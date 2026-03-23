@@ -25,8 +25,9 @@ export function reconcile(
 
   // 2. 删除：新节点不存在
   if (oldVNode != null && newVNode == null) {
-    if (oldVNode._dom) {
-      parentDom.removeChild(getDom(oldVNode)!);
+    const oldDom = getDom(oldVNode);
+    if (oldDom) {
+      parentDom.removeChild(oldDom);
     }
     return null;
   }
@@ -81,20 +82,122 @@ export function reconcile(
 }
 
 /**
- * 逐索引对比子节点列表，递归 reconcile
+ * 基于 key 的 diff 算法对比子节点列表
+ * 策略：
+ * 1. 优先按 key 匹配相同节点进行复用
+ * 2. 无法匹配 key 时按索引对比
+ * 3. 处理新增、删除、移动三种操作
  */
 function reconcileChildren(
   parentDom: HTMLElement,
   oldChildren: VNode[],
   newChildren: VNode[]
 ): void {
-  const maxLen = Math.max(oldChildren.length, newChildren.length);
+  // 构建旧子节点的 key 到索引的映射
+  const oldKeyToIndex = new Map<string | number, number>();
+  oldChildren.forEach((child, index) => {
+    if (child.key != null) {
+      oldKeyToIndex.set(child.key, index);
+    }
+  });
 
-  for (let i = 0; i < maxLen; i++) {
-    const oldChild = oldChildren[i] ?? null;
-    const newChild = newChildren[i] ?? null;
+  let oldIndex = 0;
+  let lastPlacedIndex = 0;
 
-    reconcile(parentDom, oldChild, newChild);
+  for (let newIndex = 0; newIndex < newChildren.length; newIndex++) {
+    const newChild = newChildren[newIndex];
+    const newKey = newChild.key;
+
+    // 1. 尝试通过 key 找到匹配的旧节点
+    let oldChild: VNode | null = null;
+    let matchedOldIndex = -1;
+
+    if (newKey != null) {
+      // 有 key：从 map 中查找
+      matchedOldIndex = oldKeyToIndex.get(newKey) ?? -1;
+      if (matchedOldIndex !== -1) {
+        oldChild = oldChildren[matchedOldIndex];
+      }
+    } else {
+      // 无 key：按索引对比
+      while (oldIndex < oldChildren.length) {
+        const candidate = oldChildren[oldIndex];
+        // 跳过已经有 key 且被匹配过的节点
+        if (candidate.key != null && oldKeyToIndex.has(candidate.key)) {
+          oldIndex++;
+          continue;
+        }
+        oldChild = candidate;
+        matchedOldIndex = oldIndex;
+        oldIndex++;
+        break;
+      }
+    }
+
+    // 2. 判断是否找到匹配
+    const sameType = oldChild != null && oldChild.type === newChild.type;
+
+    if (oldChild != null && sameType) {
+      // 找到同类型节点：复用并移动（如果需要）
+      const dom = reconcile(parentDom, oldChild, newChild);
+
+      // 移动节点到正确位置
+      if (dom && matchedOldIndex < lastPlacedIndex) {
+        // 需要移动：插入到当前新节点应该在的位置
+        const nextSibling = parentDom.childNodes[newIndex] ?? null;
+        if (nextSibling && dom !== nextSibling) {
+          parentDom.insertBefore(dom, nextSibling as Node);
+        }
+      } else if (dom) {
+        lastPlacedIndex = matchedOldIndex;
+      }
+
+      // 标记已使用（从 map 中删除）
+      if (newKey != null) {
+        oldKeyToIndex.delete(newKey);
+      }
+    } else {
+      // 未找到匹配：新增节点
+      const dom = mountVNode(newChild);
+      const nextSibling = parentDom.childNodes[newIndex] ?? null;
+      if (nextSibling) {
+        parentDom.insertBefore(dom, nextSibling as Node);
+      } else {
+        parentDom.appendChild(dom);
+      }
+
+      // 如果找到了不同类型节点，需要删除它
+      if (oldChild != null) {
+        const oldDom = getDom(oldChild);
+        if (oldDom) {
+          parentDom.removeChild(oldDom);
+        }
+        if (newKey != null) {
+          oldKeyToIndex.delete(newKey);
+        }
+      }
+    }
+  }
+
+  // 3. 删除未被复用的旧节点
+  for (const [key, index] of oldKeyToIndex) {
+    const oldChild = oldChildren[index];
+    const oldDom = getDom(oldChild);
+    if (oldDom) {
+      parentDom.removeChild(oldDom);
+    }
+  }
+
+  // 处理无 key 且未被遍历到的剩余旧节点
+  while (oldIndex < oldChildren.length) {
+    const oldChild = oldChildren[oldIndex];
+    if (oldChild.key == null) {
+      const oldDom = getDom(oldChild);
+      if (oldDom) {
+        parentDom.removeChild(oldDom);
+      }
+    }
+    oldIndex++;
   }
 }
 

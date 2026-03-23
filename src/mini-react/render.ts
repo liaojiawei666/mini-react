@@ -11,10 +11,12 @@ export function mountVNode(vnode: VNode): HTMLElement | Text {
   if (typeof vnode.type === "function") {
     setHooksContext(vnode, null);
     const childVNode = vnode.type({ ...vnode.props, children: vnode.children });
+    console.log("childVNodeType", childVNode.type);
     clearHooksContext();
     vnode._rendered = childVNode;
     const dom = mountVNode(childVNode);
     vnode._dom = dom;
+    console.log(vnode._dom === vnode._rendered._dom);
     return dom;
   }
 

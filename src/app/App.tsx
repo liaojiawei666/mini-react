@@ -15,7 +15,7 @@ export function App() {
       >
         Mini React Demo
       </h1>
-      <Counter />
+      <Counter/>
       <TodoList />
       <footer
         style={{
