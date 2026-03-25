@@ -1,410 +1,213 @@
-# 从零开始写 React（一）：JSX 与虚拟 DOM
+# React 原理（一）：JSX、虚拟 DOM 与挂载
 
-> **本文目的**：不是为了真的去实现一个 mini-react，而是为了学习和了解 React 工作的过程。通过手写核心代码，理解 JSX、虚拟 DOM、渲染这些概念背后的原理。
+## 一、从 Hello World 说起
 
----
-
-## 一、JSX 是什么
-
-JSX（JavaScript XML）是一种 JavaScript 语法扩展，允许你在 JS 中写类似 HTML 的代码。
-
-看这段代码：
+先用react写一个hello world
 
 ```jsx
 function App() {
   return <h1>Hello, World!</h1>;
 }
+
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(<App />);
 ```
 
-`<h1>...</h1>` 这种写法就是 JSX。它看起来很像 HTML，但实际上是 JavaScript。
-
----
-
-## 二、JSX 的原理：从 JSX 到 JS
-
-### 2.1 浏览器不认识 JSX
-
-如果你直接把上面的代码丢给浏览器，控制台会报错：
+但如果你把这段代码复制到浏览器控制台运行，会得到一个报错：
 
 ```
 Uncaught SyntaxError: Unexpected token '<'
 ```
 
-因为浏览器只认识标准的 JavaScript，而 `<h1>` 这种语法不是 JS 的一部分。
+浏览器不认识 `<h1>` 这种语法——它只认识标准的 JavaScript。
 
-**所以，我们需要一个"翻译"的过程。**
+**那么问题来了：这段代码是怎么在页面上显示出 "Hello, World!" 的？**
 
-### 2.2 JSX 的转换规则
+本文将一步步揭开这个过程：上面的 JSX 代码，要经历哪些转换，最终才能在浏览器中运行起来。
 
-JSX 的转换规则很简单：**把标签转换成 `createElement` 函数调用**。
+## 二、JSX介绍
+JSX要转换成js代码，才能在浏览器中运行，我们可以利用babel来完成这个转换，上述JSX代码经过babel的转化后
+```js
+function App() {
+  return React.createElement("h1", null, "Hello, World!");
+}
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(React.createElement(App, null));
+```
+可以[在这里](https://babeljs.io/repl#?config_lz=N4IgZglgNgpgdgQwLYxALhAJxgBygOgCsBnADxABoQdtiYAXY9AbWZHgDdLR6FMBzBkwwATGGAQBXKIwoACOAHt6ciDDkBGDfKUq1AfSSKARpo2UQRkdJjCJUOlWOT-kUrfT1MkmAF8AuhRs2AgAxvTcWJJw9BAo6CChUAjExBChIAFBIMS8ggC0AEyRYqGKmAj05cQAajCYaYpwCYUADIUAzPlaFjgQODBQEHAwAAqYijiKxAhQCQAWYQDWmf6BOYqSmKEwACoAngMJVjaZQA&code_lz=GYVwdgxgLglg9mABAQQA6oBQEpEG8CwAUIogE4CmUIpSAPABYCMAfABLkA2HcANIgOpxSHACYBCWgHomzANxEAvkSIQEAZyhk4cTQF5EAJXIBDaABEA8gFkAdBArGo5A9qgYRcCCAC25MFBsAc0oAUQ5yX38AIQBPAEkRDAByUlckrCx5QlSdGwowEXJSDFo0VERJZkygA&lineWrap=true&version=7.29.2)直接尝试
 
-上面的代码会被转换成：
+### React 17 的新转换方式
+
+从 React 17 开始，JSX 的转换方式变了。上面代码将转换成
 
 ```javascript
+import { jsx as _jsx } from "react/jsx-runtime";
 function App() {
-  return React.createElement('h1', null, 'Hello, World!');
+  return /*#__PURE__*/_jsx("h1", {
+    children: "Hello, World!"
+  });
+}
+const root = ReactDOM.createRoot(document.getElementById('root'));
+root.render(/*#__PURE__*/_jsx(App, {}));
+```
+
+**`_jsx` 和 `createElement` 本质一样**，都是接收参数、返回虚拟 DOM 对象。
+
+值得注意的是： Babel 会自动处理 import：
+- 旧方式：你需要手动写 `import React from 'react'`
+- 新方式：Babel 自动插入 `import { jsx as _jsx } from "react/jsx-runtime"`
+
+这个 `react/jsx-runtime` 是 React 17 新增的模块，专门提供 `_jsx` 函数。
+
+所以虽然看起来变了，但核心逻辑没变：**JSX → 函数调用 → 虚拟 DOM**。理解 `React.createElement` 仍然有助于理解 React 的工作原理。
+
+通过配置 `runtime` 参数，可以控制 Babel 的转换方式：
+
+| runtime 值 | 转换结果 | 是否需要 import React |
+|-----------|---------|---------------------|
+| `"classic"` | `React.createElement(...)` | 需要 |
+| `"automatic"` | `import { jsx as _jsx } from "react/jsx-runtime"` + `_jsx(...)` | 不需要 |
+
+例如，使用 `"classic"` 模式：
+
+```json
+{
+  "presets": [
+    ["@babel/preset-react", { "runtime": "classic" }]
+  ]
 }
 ```
 
-你可以在线体验这个转换过程：
+这样 JSX 会转换成 `React.createElement` 调用。
 
-> **Babel 在线转换工具**：https://babeljs.io/repl
-> 
-> 在左侧输入 JSX，右侧就能看到转换后的 JavaScript。
 
-转换规则对照：
+## 三、JSX 转换的原理
 
-| JSX 写法 | 转换结果 |
-|---------|---------|
-| `<div>text</div>` | `React.createElement('div', null, 'text')` |
-| `<div className="a" />` | `React.createElement('div', { className: 'a' })` |
-| `<div><span /></div>` | `React.createElement('div', null, React.createElement('span'))` |
+> 为了简单起见，以下示例都以转换成 `React.createElement` 为例（即 `runtime: "classic"` 模式）。`runtime: "automatic"` 模式的转换逻辑相同，只是函数名不同。
 
-**注意三个参数**：
-1. 第一个参数：标签名（字符串）或组件（函数）
-2. 第二个参数：属性对象（props），没有就是 null
-3. 第三个及以后：子节点（可以是字符串、其他元素、或数组）
+JSX 转换的核心规则很简单：**把标签语法转换成 `createElement` 函数调用**。
 
-### 2.3 复杂结构的转换
+`createElement` 的函数签名是：
 
-如果结构再复杂一点：
+```javascript
+React.createElement(type, props, ...children)
+```
+
+| 参数 | 含义 | 示例 |
+|-----|------|------|
+| `type` | 标签名或组件 | `'div'`、`Card` |
+| `props` | 属性对象 | `{ className: 'container' }` |
+| `...children` | 子节点（可变参数） | 字符串、其他元素等 |
+
+转换器就是按照这个签名，把 JSX 的各部分映射到对应的参数上。
+
+### 例子 1：基础标签
 
 ```jsx
+// 你写的 JSX
+<div className="container">Hello</div>
+```
+
+```javascript
+// 转换后
+React.createElement('div', { className: 'container' }, 'Hello')
+```
+
+- `type` → `'div'`（标签名字符串）
+- `props` → `{ className: 'container' }`（属性对象）
+- `children` → `'Hello'`（文本子节点）
+
+### 例子 2：嵌套结构
+
+```jsx
+// 你写的 JSX
 <div>
   <h1>Title</h1>
   <p>Content</p>
 </div>
 ```
 
-转换后变成：
-
 ```javascript
+// 转换后
 React.createElement('div', null,
   React.createElement('h1', null, 'Title'),
   React.createElement('p', null, 'Content')
-);
+)
 ```
 
-**感受一下**：嵌套一深，`createElement` 的写法就变得难以阅读。JSX 的出现正是为了解决这个问题。
+子标签也被转换成 `createElement` 调用，作为父标签的参数。
 
----
+### 例子 3：组件
 
-## 三、为什么要用虚拟 DOM
-
-### 3.1 直接操作 DOM 的问题
-
-现在我们知道 JSX 会被转换成 `createElement`。那 `createElement` 应该返回什么？
-
-**方案一：直接返回真实 DOM**
+```jsx
+// 你写的 JSX
+<Card title="Hello">
+  <Text>World</Text>
+</Card>
+```
 
 ```javascript
-function createElement(type, props, children) {
-  const el = document.createElement(type);
-  // 设置属性、添加子元素...
-  return el;
-}
+// 转换后
+React.createElement(Card, { title: 'Hello' },
+  React.createElement(Text, null, 'World')
+)
 ```
 
-这个方案有个明显的问题：**一调用就创建真实 DOM**。
+大写字母开头的标签被识别为组件，直接作为变量传入，而不是字符串。
 
-如果组件嵌套很深，比如：
+### 例子 4：JavaScript 表达式
+
+大括号 `{}` 里的内容会被原样保留为 JavaScript 表达式：
 
 ```jsx
-<App>
-  <Header>
-    <Nav>
-      <Link>...</Link>
-    </Nav>
-  </Header>
-</App>
-```
+// 简单表达式
+<div>{count + 1}</div>
+// → React.createElement('div', null, count + 1)
 
-每次渲染都要创建一堆 DOM 节点，性能很差。而且如果后面发现有些节点其实不需要更新，这就白白创建了。
-
-### 3.2 方案二：先返回一个"描述"
-
-这就是**虚拟 DOM** 的核心思想：
-
-> 不立即创建真实 DOM，而是先用一个轻量的 JavaScript 对象描述这个元素，等到真正需要时，再一次性创建或更新真实 DOM。
-
-好处很明显：
-1. **创建对象很快**：纯内存操作，不涉及浏览器渲染
-2. **可以对比**：更新前比较新旧对象，找出真正变化的部分
-3. **批量更新**：把多次修改合并，一次性更新真实 DOM
-
-### 3.3 虚拟 DOM 长什么样
-
-只是一个普通的 JavaScript 对象：
-
-```typescript
-interface VNode {
-  type: string;              // 标签名，比如 "div"、"h1"
-  props: Record<string, any>; // 属性对象，比如 { className: 'title' }
-  children: VNode[];         // 子节点数组
-}
-```
-
-举个例子，这段 JSX：
-
-```jsx
-<div className="container">
-  <h1>Hello</h1>
-</div>
-```
-
-对应的虚拟 DOM：
-
-```javascript
-{
-  type: 'div',
-  props: { className: 'container' },
-  children: [
-    {
-      type: 'h1',
-      props: {},
-      children: [
-        { type: 'TEXT_ELEMENT', props: { nodeValue: 'Hello' } }
-      ]
-    }
-  ]
-}
-```
-
-**注意**：文本节点没有标签名，我们用 `TEXT_ELEMENT` 作为特殊标记。
-
----
-
-## 四、createElement：创建虚拟 DOM
-
-`createElement` 的任务就是把 JSX 转换后的参数，组装成虚拟 DOM 对象。
-
-### 4.1 要处理的几种情况
-
-**情况一：普通元素**
-
-```javascript
-createElement('div', { className: 'app' }, 'Hello')
-// 返回 { type: 'div', props: { className: 'app' }, children: [...] }
-```
-
-**情况二：嵌套子元素**
-
-```jsx
-<div><span>A</span><span>B</span></div>
-```
-
-子元素已经是 `createElement` 的返回值（VNode），直接放入 children 数组。
-
-**情况三：字符串/数字**
-
-```jsx
-<div>Hello</div>
-```
-
-文本需要包装成特殊的 VNode：
-
-```javascript
-{ type: 'TEXT_ELEMENT', props: { nodeValue: 'Hello' }, children: [] }
-```
-
-**情况四：数组（列表渲染）**
-
-```jsx
-<ul>{items.map(i => <li>{i}</li>)}</ul>
-```
-
-`map` 返回的是数组，需要把数组"拍平"放入 children。
-
-**情况五：null/undefined/false**
-
-```jsx
+// 条件渲染
 <div>{show && <span>显示</span>}</div>
+// → React.createElement('div', null, show && React.createElement('span', null, '显示'))
+
+// 列表渲染
+<ul>{items.map(item => <li>{item.name}</li>)}</ul>
+// → React.createElement('ul', null, items.map(item => React.createElement('li', null, item.name)))
 ```
 
-条件为 false 时，应该过滤掉，不放入 children。
+**规则**：`{}` 里的代码原样保留，只对其中出现的标签进行转换。
 
-### 4.2 核心逻辑
-
-```javascript
-function createElement(type, props, ...children) {
-  return {
-    type,
-    props: props || {},
-    children: children
-      .flat()                    // 拍平嵌套数组
-      .filter(c => c != null && typeof c !== 'boolean')  // 过滤 null/false
-      .map(c => typeof c === 'string' || typeof c === 'number'
-        ? { type: 'TEXT_ELEMENT', props: { nodeValue: String(c) }, children: [] }
-        : c
-      )
-  };
-}
-```
-
----
-
-## 五、Mount：从虚拟 DOM 到真实 DOM
-
-有了虚拟 DOM，下一步就是把它变成屏幕上真实的东西。这个过程叫做 **Mount（挂载）**。
-
-### 5.1 挂载的过程
-
-就像搭积木，从根节点开始，一层层往下：
-
-1. 看 `type` 是什么标签，用 `document.createElement` 创建对应元素
-2. 把 `props` 里的属性设置到元素上（className、style、事件等）
-3. 对每个子节点，递归执行步骤 1-2
-4. 把子元素添加到父元素中
-
-### 5.2 文本节点的处理
-
-文本节点用 `document.createTextNode` 创建：
-
-```javascript
-if (vnode.type === 'TEXT_ELEMENT') {
-  return document.createTextNode(vnode.props.nodeValue);
-}
-```
-
-为什么不用 `innerHTML`？因为直接设置 HTML 字符串有安全风险（XSS 攻击），而且会重新解析整个内容。用 `createTextNode` 更安全、更高效。
-
-### 5.3 属性的处理
-
-不同类型的属性需要不同的处理方式：
-
-- `className` → `element.className`
-- `style`（对象）→ `Object.assign(element.style, styleObj)`
-- `onClick` 等事件 → `element.addEventListener('click', handler)`
-- 其他属性 → `element.setAttribute(key, value)`
-
----
-
-## 六、完整流程图
-
-把整个过程串起来：
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│  1. 你写的 JSX 代码                                          │
-│                                                             │
-│  function App() {                                           │
-│    return <h1 className="title">Hello, World!</h1>;        │
-│  }                                                          │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼  Babel/Vite 编译
-┌─────────────────────────────────────────────────────────────┐
-│  2. 转换后的 JavaScript                                      │
-│                                                             │
-│  function App() {                                           │
-│    return createElement('h1', { className: 'title' },       │
-│      'Hello, World!');                                      │
-│  }                                                          │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼  执行 createElement
-┌─────────────────────────────────────────────────────────────┐
-│  3. 虚拟 DOM（VNode）                                        │
-│                                                             │
-│  {                                                          │
-│    type: 'h1',                                              │
-│    props: { className: 'title' },                           │
-│    children: [                                              │
-│      { type: 'TEXT_ELEMENT', props: { nodeValue: 'Hello...' }}
-│    ]                                                        │
-│  }                                                          │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼  递归 Mount
-┌─────────────────────────────────────────────────────────────┐
-│  4. 真实 DOM（HTML）                                         │
-│                                                             │
-│  <h1 class="title">Hello, World!</h1>                       │
-│                                                             │
-│  最终插入页面，用户看到界面                                   │
-└─────────────────────────────────────────────────────────────┘
-```
-
----
-
-## 七、为什么要用 JSX
-
-看完上面的内容，你可能会问：**为什么要多此一举用 JSX？直接写 `createElement` 不行吗？**
-
-### 7.1 对比两种写法
-
-假设要写一个导航栏：
-
-**不用 JSX：**
-
-```javascript
-React.createElement('nav', { className: 'navbar' },
-  React.createElement('div', { className: 'logo' }, 'MyApp'),
-  React.createElement('ul', { className: 'menu' },
-    React.createElement('li', null, 
-      React.createElement('a', { href: '/' }, 'Home')
-    ),
-    React.createElement('li', null,
-      React.createElement('a', { href: '/about' }, 'About')
-    )
-  )
-);
-```
-
-**用 JSX：**
+### 例子 5：函数组件中的代码
 
 ```jsx
-<nav className="navbar">
-  <div className="logo">MyApp</div>
-  <ul className="menu">
-    <li><a href="/">Home</a></li>
-    <li><a href="/about">About</a></li>
-  </ul>
-</nav>
+// 你写的 JSX
+function Counter() {
+  const count = 1 + 1;  // 这行不会转换
+  console.log(count);    // 这行不会转换
+  
+  return <div>{count}</div>;  // 只有这里会转换
+}
 ```
 
-### 7.2 JSX 的好处
+```javascript
+// 转换后
+function Counter() {
+  const count = 1 + 1;  // 原样保留
+  console.log(count);    // 原样保留
+  
+  return React.createElement('div', null, count);  // 只有 return 被转换
+}
+```
 
-| 好处 | 说明 |
-|-----|------|
-| **直观** | 一眼就能看出界面的结构，像看 HTML 一样 |
-| **易维护** | 结构和逻辑分离，修改界面不用在嵌套函数里找 |
-| **错误少** | 标签不匹配时，编辑器能提示；写 `createElement` 容易漏参数 |
-| **生态好** | 编辑器支持语法高亮、自动补全、代码折叠 |
+**关键点**：JSX 转换器只处理标签语法，函数组件中的其他 JavaScript 代码（变量声明、函数调用、条件判断等）完全原样保留。
 
-### 7.3 一个常见的误解
+### 转换的本质
 
-有人说"JSX 让代码更快"，这是错的。**JSX 最终还是要转换成 `createElement`**，性能上没有区别。
+从上面的例子可以看出，JSX 转换器只做一件事：**把类 HTML 的语法转换成 `createElement` 函数调用**。
 
-JSX 的价值在于**开发体验**——让写代码的人更舒服，让读代码的人更容易理解。
+它只关注：
+- 标签名 → `type` 参数
+- 属性 → `props` 对象
+- 子节点 → `children` 参数
 
----
+其他所有代码（变量、表达式、逻辑控制等）都原样保留，留给 JavaScript 引擎在运行时处理。
 
-## 八、总结
 
-本文介绍了 React 最基础的工作原理：
-
-| 阶段 | 做了什么 | 核心思想 |
-|-----|---------|---------|
-| **JSX** | 用类 HTML 语法描述界面 | 声明式编程，直观易懂 |
-| **转换** | Babel 把 JSX 编译成 `createElement` 调用 | 浏览器只认识标准 JS |
-| **虚拟 DOM** | `createElement` 返回轻量对象 | 延迟创建真实 DOM，便于优化 |
-| **Mount** | 递归创建真实 DOM 并插入页面 | 自顶向下构建界面 |
-
-**关键洞察**：
-
-React 的核心不是"快"，而是**让复杂界面易于维护**。虚拟 DOM 和 Diff 算法是手段，声明式编程和组件化才是目的。
-
-**下一篇预告**：
-
-- 如何让组件"记住"状态？（useState 原理）
-- 状态变了如何高效更新？（Diff 算法）
-- 连续多次更新能否合并？（异步更新策略）
-
----
-
-## 参考与工具
-
-- **Babel 在线转换**：https://babeljs.io/repl
-- [React 官方文档](https://react.dev/)
-- [Vite 配置参考](https://vitejs.dev/config/)
