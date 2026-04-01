@@ -384,56 +384,47 @@ function reconcileChildren(
 }
 ```
 
-**key 的作用示意图**：
+**`reconcileChildren` 流程（与代码一致）**：
 
-旧列表 `[A, B, C, D]` → 新列表 `[E, A, B, C]`
+`instances` 的顺序**只由 `elements` 的下标顺序决定**（`instances[k]` 对应 `elements[k]`）。**不是**「旧列表第 i 行天然对应新列表第 i 行」；复用哪一项 `oldInstances[oldIndex]`，取决于下面四轮。
 
 ```mermaid
-flowchart LR
-    %% 三列：新 elements / 旧 oldInstances / 输出 instances
-    subgraph E["新 elements（按索引，从上到下）"]
-        E0["0: E (key=e)"]
-        E1["1: A (key=a)"]
-        E2["2: B (无 key)"]
-        E3["3: C (key=c)"]
+flowchart TB
+    subgraph R1["第一轮：遍历 oldInstances"]
+        R1a["有 key 的项：\nkey → 旧索引列表\n(oldInstanceMap)"]
     end
 
-    subgraph O["旧 oldInstances（按索引，从上到下）"]
-        O0["0: A (key=a)"]
-        O1["1: X (无 key)"]
-        O2["2: B (无 key)"]
-        O3["3: C (key=c)"]
+    subgraph R2["第二轮：遍历 elements"]
+        R2a["有 key 且 oldInstanceMap 有该 key：\n从列表中 shift 一个 oldIndex\n→ matchedOldIndices\n→ orderMap[elementIndex] = oldIndex"]
     end
 
-    subgraph I["输出 instances（按 elements 顺序）"]
-        I0["instances[0]（来自 E0）"]
-        I1["instances[1]（来自 E1）"]
-        I2["instances[2]（来自 E2）"]
-        I3["instances[3]（来自 E3）"]
+    subgraph R3["第三轮：再按 elements 下标顺序遍历"]
+        R3a{"当前 index 在 orderMap 里？"}
+        R3a -->|是| R3b["oldIndex = orderMap[index]\nreconcile(oldInstances[oldIndex], element)"]
+        R3a -->|否| R3c["while 跳过 matchedOldIndices 里的 oldIndex"]
+        R3c --> R3d{"oldIndex 仍小于旧列表长度？"}
+        R3d -->|是| R3e["reconcile(oldInstances[oldIndex], element)\n然后 oldIndex++"]
+        R3d -->|否| R3f["reconcile(null, element) 新建"]
+        R3b --> R3g["instances.push 结果，更新 beforeNode"]
+        R3e --> R3g
+        R3f --> R3g
     end
 
-    %% elements 与 instances 垂直对齐，一一对应
-    E0 --- I0
-    E1 --- I1
-    E2 --- I2
-    E3 --- I3
+    subgraph R4["第四轮：尾部卸载"]
+        R4a["i 从 elements.length 到 oldInstances.length - 1\nunmount(oldInstances[i])"]
+    end
 
-    %% 先用 key 在 oldInstances 中复用
-    O0 -. "key=a" .-> I1
-    O3 -. "key=c" .-> I3
-
-    %% 剩余没有 key 或未匹配的，按索引顺序匹配
-    O2 -. "无 key，按 index 匹配" .-> I2
-
-    %% 多余的 oldInstances 直接卸载
-    O1 -. "多余 oldInstances[i] → 卸载" .-> X["unmount()"]
+    R1 --> R2 --> R3 --> R4
 ```
 
-**对比结果**：
-- **有 key**：E 新建，A/B/C 复用，D 卸载 → 仅 2 次 DOM 操作
-- **无 key**：4 次替换 + 1 次创建 → 5 次 DOM 操作，性能极差
+**示例（旧 5 条、新 4 条）**：`elements[0..3]` 依次生成 `instances[0..3]`；多出来的 `oldInstances[4]` 在第四轮卸载。第三轮里，某 `index` 可能复用**任意** `oldIndex`（由 key 或 `while` 决定），与「旧列表行号」不必相同。
 
-**结论**：列表渲染时务必使用稳定的 `key`，让 React 知道哪些节点可以复用，避免不必要的 DOM 操作。
+| 阶段 | 作用 |
+|------|------|
+| `oldInstanceMap` | 旧列表里，每个 key 对应哪些 `oldIndex`（可多个） |
+| `orderMap` / `matchedOldIndices` | 新列表第几个 element 用旧列表第几个 instance（仅 key 路径） |
+| 第三轮 `else` 分支 | 无 key 的 element（或 key 未命中）用 `while` 找**下一个未被 key 占用的** `oldIndex` |
+| 第四轮 `for` | 新列表更短时，**尾部**旧节点全部卸载 |
 
 ## 四、父子组件更新策略
 
