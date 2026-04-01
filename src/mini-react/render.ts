@@ -1,42 +1,42 @@
-import { TEXT_ELEMENT, type VNode } from "./types";
-import { createDom, updateProps } from "./dom";
-import { setHooksContext, clearHooksContext } from "./component";
+/** @format */
 
-/**
- * 将 VNode 树递归挂载为真实 DOM
- * 返回创建的根 DOM 节点
- */
-export function mountVNode(vnode: VNode): HTMLElement | Text {
-  // 函数组件
-  if (typeof vnode.type === "function") {
-    setHooksContext(vnode, null);
-    const childVNode = vnode.type({ ...vnode.props, children: vnode.children });
-    console.log("childVNodeType", childVNode.type);
-    clearHooksContext();
-    vnode._rendered = childVNode;
-    const dom = mountVNode(childVNode);
-    vnode._dom = dom;
-    console.log(vnode._dom === vnode._rendered._dom);
-    return dom;
+import { reconcile } from "./reconciler";
+import { setScheduleUpdate } from "./hooks";
+import type { Element, Instance } from "./types";
+
+let rootInstance: Instance | null = null;
+let rootContainer: Node | null = null;
+let rootElement: Element | null = null;
+
+// ============================================================================
+// Batched Update Scheduling
+// ============================================================================
+
+let isPending = false;
+
+function scheduleUpdate(): void {
+  if (isPending) return;
+  isPending = true;
+  queueMicrotask(() => {
+    isPending = false;
+    rerender();
+  });
+}
+
+function rerender(): void {
+  if (rootElement && rootContainer) {
+    rootInstance = reconcile(rootContainer, rootInstance, rootElement, rootContainer.firstChild);
   }
+}
 
-  // 文本节点
-  if (vnode.type === TEXT_ELEMENT) {
-    const textNode = document.createTextNode(vnode.props.nodeValue);
-    vnode._dom = textNode;
-    return textNode;
-  }
+setScheduleUpdate(scheduleUpdate);
 
-  // 原生 HTML 元素
-  const dom = document.createElement(vnode.type);
-  updateProps(dom, {}, vnode.props);
+// ============================================================================
+// Public API
+// ============================================================================
 
-  // 递归挂载子节点
-  for (const child of vnode.children) {
-    const childDom = mountVNode(child);
-    dom.appendChild(childDom);
-  }
-
-  vnode._dom = dom;
-  return dom;
+export function render(element: Element, container: Node): void {
+  rootElement = element;
+  rootContainer = container;
+  rootInstance = reconcile(container, rootInstance, element, container.firstChild);
 }

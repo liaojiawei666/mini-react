@@ -1,8 +1,16 @@
-# React 原理（一）：JSX、虚拟 DOM 与挂载
+# React 原理（一）：JSX是如何运行起来的
+
+React 是一个用于构建用户界面的 JavaScript 库。它把页面拆成组件，用声明式方式描述 UI，并通过状态驱动界面更新。
+
+理解 React 原理，可以帮助我们看清每一行代码最终是如何运行的：为什么会渲染、什么时候会更新、更新时做了哪些事。这样不仅能写出更稳健的代码，也能在出现问题时更快定位原因。
+
+但直接阅读 React 源码往往成本很高：工程体量大、分支多、细节密集，初学时很容易陷入实现细节，反而抓不住主干流程。
+
+因此本文不直接啃源码，而是聚焦一条最核心的链路：**JSX → createElement → 虚拟 DOM → render → 真实 DOM**。先把这条主线走通，再在下一篇进入状态更新机制和 diff。
 
 ## 一、从 Hello World 说起
 
-先用react写一个hello world
+先看一个最常见的 Hello World：
 
 ```jsx
 function App() {
@@ -15,18 +23,26 @@ root.render(<App />);
 
 但如果你把这段代码复制到浏览器控制台运行，会得到一个报错：
 
-```
+```ini
 Uncaught SyntaxError: Unexpected token '<'
 ```
 
 浏览器不认识 `<h1>` 这种语法——它只认识标准的 JavaScript。
 
-**那么问题来了：这段代码是怎么在页面上显示出 "Hello, World!" 的？**
+**那么问题来了：这段代码是怎么一步步显示到页面上的？**
 
-本文将一步步揭开这个过程：上面的 JSX 代码，要经历哪些转换，最终才能在浏览器中运行起来。
+从这段代码开始，我们依次回答三个问题：
 
-## 二、JSX介绍
-JSX要转换成js代码，才能在浏览器中运行，我们可以利用babel来完成这个转换，上述JSX代码经过babel的转化后
+1. JSX 是怎么变成 JavaScript 的？
+2. JavaScript 对象是怎么表示页面结构的？
+3. 这些对象又是怎么变成真实 DOM 的？
+
+## 二、JSX 介绍
+
+浏览器只能执行 JavaScript，不能直接执行 JSX。
+
+React 在浏览器里运行之前，第一步一定是把 JSX 转成普通 JS。常见做法是使用 Babel。上面的代码转换后如下：
+
 ```js
 function App() {
   return React.createElement("h1", null, "Hello, World!");
@@ -34,7 +50,8 @@ function App() {
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(React.createElement(App, null));
 ```
-可以[在这里](https://babeljs.io/repl#?config_lz=N4IgZglgNgpgdgQwLYxALhAJxgBygOgCsBnADxABoQdtiYAXY9AbWZHgDdLR6FMBzBkwwATGGAQBXKIwoACOAHt6ciDDkBGDfKUq1AfSSKARpo2UQRkdJjCJUOlWOT-kUrfT1MkmAF8AuhRs2AgAxvTcWJJw9BAo6CChUAjExBChIAFBIMS8ggC0AEyRYqGKmAj05cQAajCYaYpwCYUADIUAzPlaFjgQODBQEHAwAAqYijiKxAhQCQAWYQDWmf6BOYqSmKEwACoAngMJVjaZQA&code_lz=GYVwdgxgLglg9mABAQQA6oBQEpEG8CwAUIogE4CmUIpSAPABYCMAfABLkA2HcANIgOpxSHACYBCWgHomzANxEAvkSIQEAZyhk4cTQF5EAJXIBDaABEA8gFkAdBArGo5A9qgYRcCCAC25MFBsAc0oAUQ5yX38AIQBPAEkRDAByUlckrCx5QlSdGwowEXJSDFo0VERJZkygA&lineWrap=true&version=7.29.2)直接尝试
+
+可以[在这里](https://babeljs.io/repl#?config_lz=N4IgZglgNgpgdgQwLYxALhAJxgBygOgCsBnADxABoQdtiYAXY9AbWZHgDdLR6FMBzBkwwATGGAQBXKIwoACOAHt6ciDDkBGDfKUq1AfSSKARpo2UQRkdJjCJUOlWOT-kUrfT1MkmAF8AuhRs2AgAxvTcWJJw9BAo6CChUAjExBChIAFBIMS8ggC0AEyRYqGKmAj05cQAajCYaYpwCYUADIUAzPlaFjgQODBQEHAwAAqYijiKxAhQCQAWYQDWmf6BOYqSmKEwACoAngMJVjaZQA&code_lz=GYVwdgxgLglg9mABAQQA6oBQEpEG8CwAUIogE4CmUIpSAPABYCMAfABLkA2HcANIgOpxSHACYBCWgHomzANxEAvkSIQEAZyhk4cTQF5EAJXIBDaABEA8gFkAdBArGo5A9qgYRcCCAC25MFBsAc0oAUQ5yX38AIQBPAEkRDAByUlckrCx5QlSdGwowEXJSDFo0VERJZkygA&lineWrap=true&version=7.29.2)直接尝试。
 
 ### React 17 的新转换方式
 
@@ -51,15 +68,22 @@ const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(/*#__PURE__*/_jsx(App, {}));
 ```
 
-**`_jsx` 和 `createElement` 本质一样**，都是接收参数、返回虚拟 DOM 对象。
+__`_jsx` 和 `createElement` 本质一样__，都是接收参数、返回虚拟 DOM 对象。
 
 值得注意的是： Babel 会自动处理 import：
+
 - 旧方式：你需要手动写 `import React from 'react'`
 - 新方式：Babel 自动插入 `import { jsx as _jsx } from "react/jsx-runtime"`
 
+为什么 React 16 里“看起来没用到 React”，却仍然必须导入？
+
+因为在旧转换模式下，JSX 会被编译成 `React.createElement(...)`。也就是说，编译后的代码里实际引用了 `React` 这个变量。
+
+如果文件里没有 `import React from 'react'`，运行时就找不到 `React`，通常会报 `React is not defined`。
+
 这个 `react/jsx-runtime` 是 React 17 新增的模块，专门提供 `_jsx` 函数。
 
-所以虽然看起来变了，但核心逻辑没变：**JSX → 函数调用 → 虚拟 DOM**。理解 `React.createElement` 仍然有助于理解 React 的工作原理。
+所以虽然写法变了，核心逻辑没变：**JSX → 函数调用 → 虚拟 DOM**。
 
 通过配置 `runtime` 参数，可以控制 Babel 的转换方式：
 
@@ -80,18 +104,11 @@ root.render(/*#__PURE__*/_jsx(App, {}));
 
 这样 JSX 会转换成 `React.createElement` 调用。
 
+到这里可以先得到一个结论：**JSX 不是模板引擎，而是 JavaScript 的语法糖。**
 
 ## 三、JSX 转换的原理
 
 > 为了简单起见，以下示例都以转换成 `React.createElement` 为例（即 `runtime: "classic"` 模式）。`runtime: "automatic"` 模式的转换逻辑相同，只是函数名不同。
-
-JSX 转换的核心规则很简单：**把标签语法转换成 `createElement` 函数调用**。
-
-`createElement` 的函数签名是：
-
-```javascript
-React.createElement(type, props, ...children)
-```
 
 | 参数 | 含义 | 示例 |
 |-----|------|------|
@@ -99,7 +116,17 @@ React.createElement(type, props, ...children)
 | `props` | 属性对象 | `{ className: 'container' }` |
 | `...children` | 子节点（可变参数） | 字符串、其他元素等 |
 
-转换器就是按照这个签名，把 JSX 的各部分映射到对应的参数上。
+JSX 转换器做的事情其实很克制：只处理标签语法，不处理你的业务逻辑。
+
+核心规则只有一条：**把标签语法转换成 `createElement` 函数调用**。
+
+`createElement` 的函数签名是：
+
+```javascript
+React.createElement(type, props, ...children)
+```
+
+转换器就是按这个签名，把 JSX 的各部分一一映射到参数上。
 
 ### 例子 1：基础标签
 
@@ -201,18 +228,21 @@ function Counter() {
 
 ### 转换的本质
 
-从上面的例子可以看出，JSX 转换器只做一件事：**把类 HTML 的语法转换成 `createElement` 函数调用**。
+从上面的例子可以看出，JSX 转换器只做一件事：**把类 HTML 的语法转换成 `createElement` 调用**。
 
 它只关注：
+
 - 标签名 → `type` 参数
 - 属性 → `props` 对象
 - 子节点 → `children` 参数
 
 其他所有代码（变量、表达式、逻辑控制等）都原样保留，留给 JavaScript 引擎在运行时处理。
 
+这一节讲完后，链路已经走完第一段：**你写的 JSX，已经变成了浏览器能执行的函数调用。**
+
 ## 四、构建与运行
 
-经过 Babel 转换，我们得到了可以在浏览器中运行的 JavaScript 代码。怎么让它在页面中运行起来？
+现在我们手里已经有了可执行的 JavaScript，下一步是另一个工程问题：**这些代码如何被送到浏览器并执行？**
 
 ### 手动集成（理解原理）
 
@@ -242,11 +272,11 @@ function Counter() {
 </html>
 ```
 
-这种方式没有构建步骤，适合学习理解原理，但实际开发中很少这样用。
+这种方式没有构建步骤，适合理解原理；但在真实项目里，这一整套流程通常都由构建工具接管。
 
 ### 现代前端工程化方案
 
-实际项目中，构建工具负责把 JSX 代码转换并集成到 HTML 中。主流方案对比如下：
+实际项目中，构建工具负责把 JSX 代码转换、组织模块并集成到 HTML。主流方案对比如下：
 
 | 打包工具 | JSX 转换器 | 特点 |
 |---------|-----------|------|
@@ -257,12 +287,14 @@ function Counter() {
 
 以 Vite 运行 Hello World 为例，核心流程如下：
 
-```
-App.tsx ──Oxc转换──→ App.js ──Vite服务器──→ 浏览器
-   │                      │
-   │                      └── 注入 React，打包模块
-   └── <h1>Hello, World!</h1>
-       转换为 React.createElement('h1', null, 'Hello, World!')
+```mermaid
+flowchart TD
+  A[源码 App.tsx<br/>含 JSX]
+  B[Oxc 转换 JSX]
+  C[Vite 提供 ESM 模块]
+  D[浏览器执行并渲染]
+
+  A --> B --> C --> D
 ```
 
 **第一步：Oxc 转换 JSX**
@@ -309,12 +341,13 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 );
 ```
 
-Vite 开发服务器会：
+从开发者视角看，Vite 开发服务器主要做三件事：
+
 1. 拦截请求，实时用 Oxc 转换 JSX
 2. 处理 `import` 语句，找到对应的模块
 3. 把所有代码打包发送给浏览器
 
-配置非常简单（可选）：
+配置通常也很轻量（可选）：
 
 ```javascript
 // vite.config.ts
@@ -326,10 +359,11 @@ export default {
 ## 五、React 做了什么？
 
 现在我们已经知道：
+
 1. JSX 被转换成 `React.createElement` 调用
 2. 构建工具（如 Vite）把转换后的代码打包并注入到 HTML
 
-但还有一个关键问题：**`React.createElement` 返回什么？浏览器怎么知道该渲染什么？**
+但这里还有一个关键断点：**`React.createElement` 返回的只是 JS 对象，浏览器为什么会真的出现 DOM？**
 
 让我们先思考几个问题：
 
@@ -341,20 +375,21 @@ export default {
 
 > **问题 4**：当数据变化时，React 怎么知道该更新哪个 DOM 元素？
 
-这些问题的答案，就是 React 的核心原理所在。直接阅读 React 源码会很复杂，因为要考虑各种边界情况和性能优化。
+这些问题的答案，就是 React 的核心运行机制。直接读 React 源码会比较吃力，因为里面有大量边界处理和性能优化细节。
 
-**更好的学习方式：实现一个迷你版 React（mini-react）。**
+**更好的学习方式：先实现一个迷你版 React（mini-react）。**
 
 通过自己动手实现，我们可以：
+
 - 剥离复杂细节，抓住核心逻辑
 - 真正理解每个设计决策背后的原因
 - 建立对 React 原理的直观认知
 
-在接下来的章节中，我们将一步步实现 mini-react，回答上面的四个问题。
+所以我们不急着“硬啃源码”，而是先做一个 mini-react，把主干流程先跑通。
 
 ## 六、createElement 与虚拟 DOM
 
-我们先来回答第一个问题：**`createElement` 返回什么？**
+先回答第一个问题：**`createElement` 到底返回了什么？**
 
 ### createElement 的实现
 
@@ -387,7 +422,7 @@ const element = createElement('h1', { className: 'title' }, 'Hello');
 }
 ```
 
-这就是**虚拟 DOM（Virtual DOM）**——一个用 JavaScript 对象描述的 DOM 结构。
+这就是**虚拟 DOM（Virtual DOM）**：用 JavaScript 对象描述 DOM 结构。
 
 ### 为什么叫"虚拟"DOM？
 
@@ -397,7 +432,7 @@ const element = createElement('h1', { className: 'title' }, 'Hello');
 | 操作成本 | 高（触发重排重绘） | 低（纯内存操作） |
 | 创建方式 | `document.createElement` | `createElement` 函数 |
 
-**虚拟 DOM 的本质**：用轻量级的 JS 对象来描述 UI 结构，避免直接操作昂贵的真实 DOM。
+**虚拟 DOM 的本质**：先在内存里描述 UI，再把结果同步到真实 DOM。
 
 ### 嵌套结构的表示
 
@@ -448,17 +483,42 @@ function createElement(type, props, ...children) {
 }
 ```
 
+这里的 `children.flat()` 很关键，它是把“子节点数组拍平一层”。
+
+为什么会出现嵌套数组？常见场景是列表渲染：
+
+```jsx
+<ul>{items.map(item => <li>{item.name}</li>)}</ul>
+```
+
+`items.map(...)` 的结果本身是一个数组，进入 `createElement` 后，`children` 可能会变成这种结构：
+
+```js
+[
+  [element1, element2, element3]
+]
+```
+
+如果不拍平，后续渲染时会把“数组”当成单个 child 处理，导致类型不符合预期。  
+用了 `flat()` 之后，结构会变成：
+
+```js
+[element1, element2, element3]
+```
+
+这样后面的 `map` 和 `render` 才能统一按“一个 child 就是一个 element”来处理。
+
 **为什么要处理文本节点？**
 
 因为真实 DOM 中，文本也是节点（`Text` 节点）。为了保持虚拟 DOM 和真实 DOM 结构一致，我们把字符串也包装成对象。
 
-现在我们已经知道 `createElement` 返回什么了——**一个描述 UI 的 JavaScript 对象，也就是虚拟 DOM**。
+到这里，第二段链路也清晰了：`createElement` 的输出不是 DOM，而是一棵描述 UI 的对象树（虚拟 DOM）。
 
-## 七、Mount：虚拟 DOM 变成真实 DOM
+## 七、render：虚拟 DOM 变成真实 DOM
 
-现在来回答第二个问题：**怎么把虚拟 DOM 变成真实的 DOM 元素？**
+现在来回答第二个问题：**React 怎么把虚拟 DOM 变成真实 DOM？**
 
-这个过程叫做**挂载（Mount）**。为了理解它，我们先看一个具体的例子。
+这里我们先只关注 `render` 这件事：把虚拟 DOM 递归转换成真实 DOM。
 
 ### 从例子出发
 
@@ -475,10 +535,10 @@ function App() {
 }
 ```
 
-使用 `<App />` 时，JSX 会转换成 `createElement(App)`。注意这里的 `type` 是函数 `App`，而不是字符串：
+使用 `<App />` 时，JSX 会转换成 `createElement(App)`。注意这里的 `type` 是函数 `App`，不是字符串标签名：
 
 ```javascript
-const vnode = {
+const element = {
   type: App,  // 函数组件
   props: { children: [] }
 };
@@ -486,16 +546,16 @@ const vnode = {
 
 ### 函数组件的处理
 
-组件不是真实的 DOM 节点，它只是一个**返回虚拟 DOM 的函数**。渲染时需要先执行它：
+函数组件本身不是 DOM 节点，它是一个“返回虚拟 DOM 的函数”。渲染时 React 会先执行它：
 
 ```javascript
-function render(vnode, container) {
+function render(element, container) {
   // 处理函数组件
-  if (typeof vnode.type === 'function') {
+  if (typeof element.type === 'function') {
     // 执行组件函数，得到返回的虚拟 DOM
-    const childVNode = vnode.type(vnode.props);
+    const childElement = element.type(element.props);
     // 递归渲染返回的结果
-    render(childVNode, container);
+    render(childElement, container);
     return;
   }
   
@@ -503,7 +563,7 @@ function render(vnode, container) {
 }
 ```
 
-执行 `App()` 后，得到它返回的虚拟 DOM：
+执行 `App()` 后，会得到它返回的虚拟 DOM：
 
 ```javascript
 {
@@ -528,33 +588,32 @@ function render(vnode, container) {
   }
 }
 ```
-```
 
-### 挂载的核心流程
+### render 的核心流程
 
-把这个虚拟 DOM 变成真实 DOM，需要经历三个阶段：
+把虚拟 DOM 变成真实 DOM，核心是三步：
 
 ```mermaid
 graph LR
     A[创建 DOM 节点] --> B[设置属性 props]
-    B --> C[挂载子节点 递归]
+    B --> C[递归处理子节点]
 ```
 
-我们用代码逐步实现。
+下面我们按真实执行顺序，把这件事拆开来看。
 
 ### 第一步：创建 DOM 节点
 
-根据 `vnode.type` 决定创建什么类型的节点：
+根据 `element.type` 决定创建什么类型的节点：
 
 ```javascript
-function createDOM(vnode) {
+function createDOM(element) {
   // 文本节点：type 为 TEXT_NODE
-  if (vnode.type === 'TEXT_NODE') {
-    return document.createTextNode(vnode.props.nodeValue);
+  if (element.type === 'TEXT_NODE') {
+    return document.createTextNode(element.props.nodeValue);
   }
   
   // 普通元素节点：type 为标签名字符串，如 'div'、'h1'
-  return document.createElement(vnode.type);
+  return document.createElement(element.type);
 }
 ```
 
@@ -572,7 +631,7 @@ function updateProps(dom, props) {
     // children 是子节点，不是 DOM 属性，跳过
     if (key === 'children') return;
     
-    // 事件处理：onClick → click
+    // 事件处理（以 onClick 为例）：onClick → click，其他 onXxx 同理
     if (key.startsWith('on')) {
       const event = key.slice(2).toLowerCase();
       dom.addEventListener(event, props[key]);
@@ -587,20 +646,21 @@ function updateProps(dom, props) {
 
 **注意**：`className` 在 DOM 中就是 `className` 属性，不是 `class`（虽然 HTML 属性是 `class`）。
 
-### 第三步：递归挂载子节点
+### 第三步：递归处理子节点
 
 虚拟 DOM 是树形结构，子节点需要递归处理：
 
 ```javascript
-function render(vnode, container) {
+function render(element, container) {
+  // 函数组件分支已在前面 return，这里开始处理普通元素/文本节点
   // 1. 创建真实 DOM 节点
-  const dom = createDOM(vnode);
+  const dom = createDOM(element);
   
   // 2. 设置属性
-  updateProps(dom, vnode.props);
+  updateProps(dom, element.props);
   
-  // 3. 递归挂载子节点
-  vnode.props.children.forEach(child => {
+  // 3. 递归处理子节点
+  element.props.children.forEach(child => {
     render(child, dom);  // 注意：子节点的容器是当前 dom
   });
   
@@ -617,17 +677,11 @@ function render(vnode, container) {
 
 ```mermaid
 graph TD
-    A[render divVNode] --> B[创建 div 元素]
-    B --> C[设置 id=app]
-    C --> D[递归处理 children]
-    D --> E[render h1VNode]
-    E --> F[创建 h1 元素]
-    F --> G[递归处理 children]
-    G --> H[render textVNode]
-    H --> I[创建 TextNode Hello]
-    I --> J[添加到 h1]
-    J --> K[添加到 div]
-    K --> L[添加到 rootContainer]
+    A["调用 render"]
+    A --> B["创建当前 DOM 节点"]
+    B --> C["设置 props"]
+    C --> D["递归处理 children"]
+    D --> E["追加到 container"]
 ```
 
 ### 测试完整流程
@@ -642,11 +696,11 @@ function App() {
 }
 
 // 创建虚拟 DOM
-const appVNode = createElement(App);
+const appElement = createElement(App);
 
-// 挂载到页面
+// render 到页面
 const root = document.getElementById('root');
-render(appVNode, root);
+render(appElement, root);
 ```
 
 最终生成的 HTML 结构：
@@ -660,13 +714,256 @@ render(appVNode, root);
 </div>
 ```
 
+### 一个完整的 `vite + ts` 最小实现
+
+这一版只实现本文讲过的能力：`createElement`、`TEXT_NODE`、函数组件执行、`render` 递归。
+
+#### 1) 创建项目
+
+> Vite 8 需要 Node.js `>= 20.19` 或 `>= 22.12`。
+
+```bash
+npm create vite@latest mini-react-demo -- --template vanilla-ts
+cd mini-react-demo
+npm install
+npm run dev
+```
+
+#### 2) 必要配置
+
+`tsconfig.json`：
+
+```json
+{
+  "compilerOptions": {
+    "jsx": "react",
+    "jsxFactory": "createElement"
+  }
+}
+```
+
+- `jsx: "react"`：启用 classic JSX 转换模式（把 JSX 转成函数调用）
+- `jsxFactory: "createElement"`：指定 JSX 转换后调用我们的 `createElement`
+
+其余 `tsconfig` 配置按 Vite 默认即可，这里省略。
+
+`vite.config.ts`（两边保持一致，避免运行时找不到 JSX 工厂）：
+
+```ts
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  oxc: {
+    jsx: {
+      runtime: "classic",
+      pragma: "createElement",
+      pragmaFrag: "Fragment",
+    },
+  },
+});
+```
+
+#### 3) 目录结构
+
+```text
+mini-react-demo/
+├─ index.html
+└─ src/
+   ├─ mini-react.ts
+   ├─ jsx.d.ts
+   └─ main.tsx
+```
+
+#### 4) 代码
+
+`src/mini-react.ts`：
+
+```ts
+type Props = {
+  [key: string]: any;
+  children: Element[];
+};
+
+type HostType = string;
+type FunctionType = (props: any) => Element;
+type ElementType = HostType | FunctionType | 'TEXT_NODE';
+
+export type Element = {
+  type: ElementType;
+  props: Props;
+};
+
+function createTextNode(value: string | number): Element {
+  return {
+    type: 'TEXT_NODE',
+    props: {
+      nodeValue: String(value),
+      children: [],
+    },
+  };
+}
+
+export function createElement(
+  type: ElementType,
+  props: Record<string, any> | null,
+  ...children: any[]
+): Element {
+  return {
+    type,
+    props: {
+      ...(props ?? {}),
+      children: children
+        .flat()
+        .filter((child) => child !== null && child !== undefined && child !== false)
+        .map((child) =>
+          typeof child === 'string' || typeof child === 'number'
+            ? createTextNode(child)
+            : child
+        ),
+    },
+  };
+}
+
+function createDOM(element: Element): Node {
+  if (element.type === 'TEXT_NODE') {
+    return document.createTextNode(element.props.nodeValue);
+  }
+  return document.createElement(element.type as string);
+}
+
+function updateProps(dom: Node, props: Props): void {
+  if (!(dom instanceof Element)) return;
+
+  Object.keys(props).forEach((key) => {
+    if (key === 'children') return;
+
+    if (key.startsWith('on') && typeof props[key] === 'function') {
+      const eventName = key.slice(2).toLowerCase();
+      dom.addEventListener(eventName, props[key]);
+      return;
+    }
+
+    (dom as any)[key] = props[key];
+  });
+}
+
+export function render(element: Element, container: Node): void {
+  // 1) 先处理函数组件
+  if (typeof element.type === 'function') {
+    const childElement = element.type(element.props);
+    render(childElement, container);
+    return;
+  }
+
+  // 2) 创建当前节点
+  const dom = createDOM(element);
+
+  // 3) 设置属性
+  updateProps(dom, element.props);
+
+  // 4) 递归处理子节点
+  element.props.children.forEach((child) => render(child, dom));
+
+  // 5) 挂到容器
+  container.appendChild(dom);
+}
+```
+
+`index.html`：
+
+```html
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>mini-react-demo</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
+```
+
+`src/jsx.d.ts`（让 TS 认识 TSX 语法）：
+
+- `type Element = Element`：JSX 表达式的返回类型
+- `IntrinsicElements`：允许 `<div>`、`<h1>` 这类原生标签
+
+`src/jsx.d.ts`：
+
+```ts
+import type { Element } from './mini-react';
+
+declare global {
+  namespace JSX {
+    type Element = Element;
+    interface IntrinsicElements {
+      [elemName: string]: any;
+    }
+  }
+}
+```
+
+`src/main.tsx`：
+
+```tsx
+import { createElement, render } from './mini-react';
+
+function App() {
+  return (
+    <div id="app">
+      <h1 className="title">Hello, mini-react</h1>
+      <p>This is rendered by our own render function</p>
+      <button
+        onClick={() => {
+          console.log('clicked');
+        }}
+      >
+        Click me
+      </button>
+    </div>
+  );
+}
+
+const root = document.getElementById('root');
+
+if (!root) {
+  throw new Error('#root not found');
+}
+
+render(<App />, root);
+```
+
 ### 小结
 
-挂载过程可以概括为：
+render 过程可以概括为：
 
 1. **创建**：根据 `type` 创建对应的真实 DOM 节点
 2. **设置**：把 `props` 应用到 DOM 节点上
 3. **递归**：对 `children` 重复上述过程
 4. **组装**：把创建好的 DOM 添加到父容器中
 
-这个过程是**深度优先**的——先创建父节点，再递归创建所有子节点，最后才添加到页面。这样确保了当节点插入 DOM 树时，它的所有子节点都已经准备好了。
+这个过程是**深度优先**的：先创建父节点，再递归创建子节点，最后组装进页面。你在业务里看到的“组件树正常展开”，底层就是这套递归机制在工作。
+
+### 下一篇预告
+
+到这里，我们已经实现了一个最小可运行版本：
+
+- JSX 转换为 `createElement`
+- 用虚拟 DOM 描述 UI
+- 用 `render` 把虚拟 DOM 转成真实 DOM
+- 支持函数组件和基础事件绑定
+
+但它还有明显边界：
+
+- 没有状态系统，组件无法通过状态驱动重新渲染
+- 没有更新机制，每次都只能从头渲染
+- 没有 diff，无法做最小代价 DOM 更新
+
+下一篇会围绕“状态与更新”展开，重点实现：
+
+- `useState` 的最小版本
+- 状态变化如何触发重新渲染
+- 基于新旧虚拟 DOM 的 diff 更新流程

@@ -1,25 +1,25 @@
-// ---- 常量 ----
-export const TEXT_ELEMENT = "TEXT_ELEMENT";
+/** @format */
 
-// ---- 类型 ----
-export type Props = Record<string, any>;
+export type Props = {
+  [key: string]: any;
+  children: (Element | null)[];
+};
 
-export interface VNode {
-  type: string | ComponentFunction;
+export type HostType = string;
+export type FunctionType = (props: Props) => Element;
+export type ElementType = HostType | FunctionType | "TEXT_NODE";
+
+// 描述层 - 每次渲染新建
+export type Element = {
+  type: ElementType;
   props: Props;
-  children: VNode[];
-  key: string | number | null;
-  /** 对应的真实 DOM 节点（挂载后赋值） */
-  _dom?: HTMLElement | Text | null;
-  /** 函数组件上次渲染产出的子 VNode（用于 reconcile） */
-  _rendered?: VNode | null;
-  /** 函数组件的 hooks 状态数组 */
-  _hooks?: Hook[];
-}
+};
 
-/** 单个 hook 存储 */
-export interface Hook {
-  state: any;
-}
-
-export type ComponentFunction<P extends Props = Props> = (props: P) => VNode;
+// 运行时层 - 跨渲染复用
+export type Instance = {
+  element: Element;
+  dom: Node | null;
+  hooks: unknown[];
+  childInstances: Array<Instance | null>;
+  isDirty?: boolean;
+};
