@@ -1,14 +1,10 @@
 # React 原理（二）：状态与更新
 
-上一章走通了「JSX → 虚拟 DOM → 真实 DOM」这条主线，但实现的是一次性渲染——只能画出来，不能更新。
+> 导读：上一篇我们实现了「JSX → 虚拟 DOM → 真实 DOM」的一次性渲染。但真实的 React 应用需要**状态驱动更新**——点击按钮后数字能增加、切换选项卡能显示不同内容。本章来解决这个核心问题：**状态存在哪里？变化后如何触发重新渲染？如何最小代价更新 DOM？**
 
-这一章解决真正让 React 有价值的问题：**状态**。
+## 一、从问题出发：状态去哪了？
 
----
-
-## 一、函数每次都重新执行，状态去哪了？
-
-先看一个最常见的 demo：
+先看一个典型组件：
 
 ```tsx
 function Counter() {
@@ -22,25 +18,21 @@ function Counter() {
 }
 ```
 
-点击按钮后，`Counter` 函数会重新执行。但 `count` 没有回到 `0`，而是接着上次的值。
+点击按钮后，`Counter` 函数会重新执行，但 `count` 没有回到 `0`，而是保持了上次的值。
 
-这里有三个值得追问的问题：
+这里有三个核心问题需要回答：
 
-1. **状态存在哪**：函数执行完，局部变量就消失了，`count` 必须活在函数外部某个地方
-2. **多组件怎么隔离**：页面上有多个 `Counter`，它们各自独立，不能共用同一份状态
+1. **状态存在哪**：函数执行完局部变量就消失，`count` 必须活在函数外部
+2. **多组件怎么隔离**：页面上有多个 `Counter`，它们的状态不能互相干扰
 3. **状态变了怎么触发更新**：`setCount` 之后，UI 如何知道要重新渲染？
 
-这三个问题，就是本文要逐一回答的。
+## 二、useState 的实现
 
----
+### 2.1 核心数据结构
 
-## 二、两层数据结构：Element 与 Instance
+回答第一个问题前，先引入一个关键认知：React 内部维护着**两棵树**。
 
-在回答上面的问题之前，先要建立一个关键认知：React 内部维护着**两棵树**，分别承担不同职责。
-
-### Element：描述层
-
-`Element` 就是上一章介绍的虚拟 DOM，由 `createElement` 生成：
+**Element 树（描述层）**：每次渲染新建，是对「UI 长什么样」的描述
 
 ```ts
 type Element = {
@@ -49,419 +41,293 @@ type Element = {
 };
 ```
 
-**关键特性**：每次 render 都会重新生成，是对「UI 长什么样」的描述，不携带任何运行时信息。
-
-### Instance：运行时层
-
-只有 Element 不够。状态、真实 DOM 引用这些信息需要跨渲染周期保活，这就是 `Instance` 的职责：
+**Instance 树（运行时层）**：跨渲染复用，存放状态、DOM 引用等运行时信息
 
 ```ts
 type Instance = {
-  element: Element;           // 上一次渲染的 Element，diff 时用来对比
-  dom: Node | null;           // 对应的真实 DOM 节点（函数组件为 null）
-  hooks: unknown[];           // 该组件所有 hook 的状态，按调用顺序存放
-  childInstances: Instance[]; // 子节点的 Instance，形成完整的运行时树
+  element: Element;            // 上一次渲染的 Element，diff 时用来对比
+  dom: Node | null;            // 对应的真实 DOM 节点（函数组件为 null）
+  hooks: unknown[];            // 该组件所有 hook 的状态，按调用顺序存放
+  childInstances: Instance[];  // 子节点的 Instance，形成完整的运行时树
+  isDirty?: boolean;           // 标记该组件是否需要重新执行
 };
 ```
 
-逐字段解释为什么需要它：
+```mermaid
+graph LR
+    subgraph 每次render新建[每次 render 新建 - Element 树]
+        E1[<&lt;Counter/&gt;]
+        E2[<&lt;div&gt;]
+        E1 --> E2
+    end
 
-| 字段 | 作用 |
-|------|------|
-| `element` | 保存上一次的描述，下次更新时与新 Element 做 diff |
-| `dom` | 直接引用真实 DOM，更新时不用重新查找 |
-| `hooks` | 状态就放在这里，函数重新执行时从这里读，写回也写这里 |
-| `childInstances` | 递归结构，与 Element 树一一对应 |
+    subgraph 跨渲染复用[跨渲染复用 - Instance 树]
+        I1[Counter Instance]
+        I2[div Instance]
+        I1 --> I2
+    end
 
-### 两棵树的关系
-
-```ini
-每次 render 新建                    跨渲染复用
-┌─────────────┐                  ┌──────────────┐
-│ Element 树   │  ←── diff ──→  │ Instance 树   │
-│             │                  │              │
-│ <App />     │                  │ App Instance │
-│   <Counter/>│                  │   Counter Ins│
-│     <div>   │                  │     div Ins  │
-└─────────────┘                  └──────────────┘
+    每次render新建 <-->|diff| 跨渲染复用
 ```
 
-Element 描述「应该长什么样」，Instance 记录「现在长什么样」。协调（reconcile）就是把两者对比，最小化更新真实 DOM。
+Element 描述「应该长什么样」，Instance 记录「现在长什么样」。状态就存放在 Instance 的 `hooks` 数组里。
 
----
+### 2.2 mini-react 中的 useState
 
-## 三、useState：三步推导
-
-有了数据结构的基础，现在来看 `useState` 是如何一步步实现的。
-
-### 第一版：全局数组
-
-最直观的思路——状态挂全局，用游标 `hookIndex` 按顺序对应槽位：
-
-```ts
-const hookStates: unknown[] = [];
+```typescript
+// hooks.ts - 核心实现
+let currentInstance: Instance | null = null;
 let hookIndex = 0;
 
-function useState<T>(initial: T): [T, (next: T) => void] {
-  const i = hookIndex++;
-  if (hookStates[i] === undefined) hookStates[i] = initial;
-
-  const setState = (next: T) => {
-    hookStates[i] = next;
-    scheduleUpdate();
-  };
-
-  return [hookStates[i] as T, setState];
-}
-
-// 每次渲染前重置游标
-function rerender() {
+// 渲染组件前调用，设置当前组件上下文
+export function prepareHookContext(instance: Instance): void {
+  currentInstance = instance;
   hookIndex = 0;
-  // ... 重新渲染
-}
-```
-
-这版能跑，但有个致命问题：**组件树必须完全一致，不能变**。
-
-```ini
-第一次渲染：App → Counter A → useState[0] = 0
-           └→ Counter B → useState[1] = 0
-
-第二次渲染：App → Counter B → useState[0] = ??? ← 读到 A 的状态！
-           （A 被条件渲染跳过了）
-```
-
-## 只要组件数量或顺序变了（条件渲染、循环渲染），游标就对不上，状态完全错乱。
-
-### 第二版：HookContext 上下文（最终版）
-
-解法很自然——每个组件有自己的 `Instance`，把 `hooks` 数组挂上去：
-
-```ts
-type Instance = {
-  // ...
-  hooks: unknown[];  // 每个组件独立的 hooks 数组
-};
-```
-
-隔离问题解决了。但立刻出现新问题：`useState` 是一个独立函数，它怎么知道「当前正在渲染哪个组件」、该用哪个 Instance 的 hooks 数组？
-
-答案是引入一个模块级变量 `currentContext`，在执行函数组件前后用两个函数包夹：
-
-```ts
-// hooks.ts
-type HookContext = { hooks: unknown[] };
-
-let currentContext: HookContext | null = null;
-let hookIndex = 0;
-
-// 进入组件前调用：准备好这个组件的 hooks 数组
-export function prepareHookContext(ctx: HookContext | null): HookContext {
-  currentContext = ctx ?? { hooks: [] };  // null → mount，创建新数组
-  hookIndex = 0;                          // 游标归零
-  return currentContext;
 }
 
-// 退出组件后调用：清空，防止组件外调用 useState
+// 渲染完成后调用，清理上下文
 export function clearHookContext(): void {
-  currentContext = null;
+  currentInstance = null;
   hookIndex = 0;
 }
-```
 
-`useState` 内部从 `currentContext` 读写，完全不依赖全局状态：
+export function useState<T>(initial: T): [T, (v: T | ((p: T) => T)) => void] {
+  if (!currentInstance) {
+    throw new Error("useState must be called inside a component");
+  }
 
-```ts
-export function useState<T>(initial: T): [T, (next: T | ((p: T) => T)) => void] {
-  if (!currentContext) throw new Error("useState must be called inside a component");
-
-  const ctx = currentContext;  // 闭包捕获，setState 时还能访问
+  const ctx = currentInstance;
   const i = hookIndex++;
 
-  if (ctx.hooks[i] === undefined) ctx.hooks[i] = initial;  // 首次初始化
+  // 首次渲染：初始化状态；后续渲染：复用已有状态
+  if (ctx.hooks[i] === undefined) {
+    ctx.hooks[i] = initial;
+  }
 
   const setState = (next: T | ((p: T) => T)) => {
     const prev = ctx.hooks[i] as T;
-    ctx.hooks[i] = typeof next === "function" ? next(prev) : next;
-    scheduleUpdate();
+    const nextValue = typeof next === "function" ? (next as (p: T) => T)(prev) : next;
+
+    if (!Object.is(prev, nextValue)) {
+      ctx.hooks[i] = nextValue;
+      ctx.isDirty = true;
+      scheduleUpdate();
+    }
   };
 
   return [ctx.hooks[i] as T, setState];
 }
 ```
 
-**mount 和 update 的区别就在 `prepareHookContext` 的入参：**
+**代码解析**：
 
-```ts
-// mount：首次渲染，hooks 从空数组开始
-prepareHookContext(null)
+1. **`currentInstance` 和 `hookIndex`**：使用全局变量记录「当前正在渲染的组件」和「当前执行到第几个 hook」。这是 hooks 规则（只能在顶层调用、不能放在 if 里）的技术基础——完全依赖调用顺序来确定状态位置。
 
-// update：状态更新，复用旧 Instance 的 hooks 数组
-prepareHookContext({ hooks: oldInstance.hooks })
+2. **`prepareHookContext` / `clearHookContext`**：在组件执行前后设置/清理上下文。渲染函数组件前先调用 `prepareHookContext(instance)`，这样 `useState` 内部就能找到该把状态存到哪个 Instance 的 hooks 数组的哪个位置。
+
+3. **`ctx.hooks[i]`**：状态的实际存储位置。首次渲染时初始化为 `initial`，后续渲染直接复用。这就是为什么函数重新执行后，状态不会丢失。
+
+4. **`setState`**：
+   - 支持函数式更新 `(prev) => next`，也支持直接赋值
+   - 用 `Object.is` 判断是否真的变化，避免不必要的渲染
+   - 变化后设置 `ctx.isDirty = true`，标记该组件需要重新执行
+   - 调用 `scheduleUpdate()` 触发调度，等待时机重新渲染
+
+**完整案例：Counter 组件的执行过程**
+
+```tsx
+function Counter() {
+  const [count, setCount] = useState(0);        // Hook 1
+  const [loading, setLoading] = useState(false); // Hook 2
+  return <div>{count}</div>;
+}
 ```
 
-这样，同一个 `useState` 调用，在 mount 时初始化，在 update 时读到上次保存的值。
+**核心原理对比**：
 
----
+```mermaid
+flowchart TB
+    subgraph 首次["首次渲染 hooks数组"]
+        A1["useState(0)"] --> B1["hooks[0]未定义"]
+        B1 --> C1["初始化为0"]
 
-## 四、setState 之后发生了什么
+        A2["useState(false)"] --> B2["hooks[1]未定义"]
+        B2 --> C2["初始化为false"]
+    end
 
-`setState` 调用链很短，但每一步都有讲究：
+    subgraph 后续["后续渲染 复用"]
+        D1["useState(0)"] --> E1["hooks[0]已有值=1"]
+        E1 --> F1["直接复用1"]
 
-```ini
-setState(newVal)
-  → ctx.hooks[i] = newVal   // 直接原地修改 Instance.hooks
-  → scheduleUpdate()         // 通知调度器：需要重渲染了
+        D2["useState(false)"] --> E2["hooks[1]已有值=false"]
+        E2 --> F2["直接复用false"]
+    end
+
+    首次 -->|"状态保存在Instance<br/>跨渲染复用"| 后续
 ```
 
-### 为什么需要批量合并
+**核心结论**：
+- 首次渲染：按顺序初始化 hooks 数组
+- 后续渲染：按顺序复用 hooks 数组中的值
+- 这就是为什么函数重新执行后，状态不会丢失
 
-如果 `scheduleUpdate` 直接触发渲染，连续两次 `setState` 就会触发两次完整 render：
+### 2.3 状态更新调度
 
-```ts
-setCount(1);   // → render（第一次）
-setName("a");  // → render（第二次，重复！）
-```
-
-解法：用 `queueMicrotask` 把实际渲染推迟到当前同步代码执行完之后，用一个 flag 去重：
-
-```ts
-// render.ts
+```typescript
 let isPending = false;
 
 function scheduleUpdate(): void {
-  if (isPending) return;    // 已经在等了，跳过
-
+  if (isPending) return;           // 防止重复调度
   isPending = true;
-  queueMicrotask(() => {
+  queueMicrotask(() => {          // 使用微任务批量处理
     isPending = false;
-    rerender();             // 只触发一次
+    rerender();                    // 执行实际的重新渲染
   });
 }
 ```
 
-时序对比：
+**核心特性**：`scheduleUpdate` 使用 `queueMicrotask` 将更新推迟到当前执行栈清空后。这样可以在一个事件循环内合并多个 `setState` 调用，只触发一次重新渲染。比如快速点击按钮 5 次，实际只会在微任务中执行一次渲染。
 
-```ini
-没有批量：                         有批量（queueMicrotask）：
+## 三、Diff 算法：最小代价更新
 
-setCount(1) → render           setCount(1) → isPending=true, 注册微任务
-setName("a") → render          setName("a") → isPending=true, 跳过
-（共 2 次 render）              [同步代码结束]
-                                微任务执行 → render
-                                （共 1 次 render）
-```
+状态变化后，需要对比新旧两棵虚拟 DOM 树，找出最小变更集应用到真实 DOM。这就是 **reconcile（调和）** 过程。
 
----
+### 3.1 reconcile 核心逻辑
 
-## 五、diff 算法：协调与节点复用
-
-所有渲染的入口是 `reconcile`，它根据是否存在旧 Instance 决定走哪条路：
-
-```ts
-function reconcile(
-  container: Node,               // 挂载到哪个 DOM 节点
-  oldInstance: Instance | null,  // 旧的运行时状态（无则 null）
-  element: Element | null,       // 新的描述（可能为 null，表示条件渲染不显示）
-  beforeNode: Node | null        // 插入位置的参考节点
+```typescript
+// reconciler.ts
+export function reconcile(
+  container: Node,
+  oldInstance: Instance | null,
+  element: Element | null,
+  beforeNode: Node | null,
+  parentRendered: boolean = false
 ): Instance | null {
-  // element 为 null：卸载旧节点
+  // 1. 新节点为 null：卸载旧节点
   if (!element) {
-    if (oldInstance) {
-      unmount(oldInstance);
-    }
+    if (oldInstance) unmount(oldInstance);
     return null;
   }
 
-  // 首次渲染：无旧实例
+  // 2. 没有旧节点：全新挂载
   if (!oldInstance) {
     return mount(container, element, beforeNode);
   }
 
-  // 同类型更新
+  // 3. 同类型：复用更新
   if (isSameType(oldInstance.element, element)) {
-    return update(oldInstance, element, beforeNode);
+    return update(oldInstance, element, beforeNode, parentRendered);
   }
 
-  // 类型变了：卸载旧节点，挂载新节点
+  // 4. 不同类型：卸载旧节点，挂载新节点
   unmount(oldInstance);
   return mount(container, element, beforeNode);
 }
 ```
 
+**四种情况**：
 
-### mount：从零开始
-
-**函数组件**执行函数得到子元素：
-
-```ts
-function mountComponent(
-  container: Node,
-  element: Element,
-  beforeNode: Node | null = null
-): Instance {
-  const hookContext = prepareHookContext(null);
-  const childElement = (element.type as (props: Props) => Element)(element.props);
-  clearHookContext();
-
-  const childInstance = mount(container, childElement, beforeNode);
-
-  return {
-    element,
-    dom: null,
-    hooks: hookContext.hooks,
-    childInstances: [childInstance]
-  };
-}
+```mermaid
+flowchart TD
+    A[element 为 null?] -->|Yes| B[卸载旧节点<br/>返回 null]
+    A -->|No| C[oldInstance 为 null?]
+    C -->|Yes| D[执行 mount<br/>创建新节点]
+    C -->|No| E[新旧节点类型相同?]
+    E -->|Yes| F[执行 update<br/>复用 DOM 节点]
+    E -->|No| G[执行替换<br/>卸载旧节点 + 挂载新节点]
 ```
 
-**Host 元素**创建 DOM：
+### 3.2 update 过程：组件 vs 原生元素
 
-```ts
-function mountHost(
-  container: Node,
-  element: Element,
-  beforeNode: Node | null = null
-): Instance {
-  const dom =
-    element.type === "TEXT_NODE"
-      ? document.createTextNode(element.props.nodeValue)
-      : document.createElement(element.type as string);
+**函数组件的 update**：
 
-  if (dom instanceof HTMLElement) {
-    updateProps(dom, element.props, null);
-  }
-
-  if (beforeNode && beforeNode) {
-    container.insertBefore(dom, beforeNode);
-  } else {
-    container.appendChild(dom);
-  }
-
-  // 保留 null 占位，与 children 数组索引对齐
-  const childInstances: (Instance | null)[] = (element.props.children ?? []).map((child) =>
-    child ? mount(dom, child) : null
-  );
-
-  return {
-    element,
-    dom,
-    hooks: [],
-    childInstances
-  };
-}
-```
-
-### update：接续上次
-
-**函数组件**复用 hooks 重新执行：
-
-```ts
+```typescript
 function updateComponent(
   oldInstance: Instance,
   element: Element,
-  beforeNode: Node | null
+  beforeNode: Node | null,
+  parentRendered: boolean
 ): Instance {
-  prepareHookContext({ hooks: oldInstance.hooks });
-  const childElement = (element.type as (props: Props) => Element)(element.props);
-  clearHookContext();
+  const instance = oldInstance;
+  let childElement: Element | null = null;
+  let currentRendered = parentRendered;
 
-  const oldChildInstance = oldInstance.childInstances[0];
-  const parentDom = getParentDom(oldChildInstance)!;
-  const childInstance = reconcile(parentDom, oldChildInstance, childElement, beforeNode);
+  // 关键判断：父组件已渲染 或 本组件 isDirty，才重新执行
+  if (!parentRendered && !instance.isDirty) {
+    // 跳过执行，直接复用上次的子元素
+    childElement = instance.childInstances[0]?.element ?? null;
+  } else {
+    // 重新执行组件函数
+    prepareHookContext(instance);
+    childElement = (element.type as Function)(element.props);
+    clearHookContext();
+    currentRendered = true;
+    instance.isDirty = false;  // 重置标记
+  }
 
-  // childInstance 可能为 null（当 childElement 为 null 时）
-  const childInstances: (Instance | null)[] = childInstance ? [childInstance] : [];
+  // 递归调和子节点
+  const childInstance = reconcile(
+    getParentDom(instance.childInstances[0])!,
+    instance.childInstances[0],
+    childElement,
+    beforeNode,
+    currentRendered
+  );
 
-  return {
-    element,
-    dom: null,
-    hooks: oldInstance.hooks,
-    childInstances
-  };
+  instance.element = element;
+  instance.childInstances = [childInstance];
+  return instance;
 }
 ```
 
-**Host 元素**复用 DOM 更新属性：
+**原生元素的 update**：
 
-```ts
+```typescript
 function updateHost(oldInstance: Instance, element: Element): Instance {
-  const dom = oldInstance.dom!;
+  const instance = oldInstance;
+  const dom = instance.dom!;
 
-  // 处理文本节点更新
+  // 文本节点：直接修改 nodeValue
   if (element.type === "TEXT_NODE") {
     const newText = element.props.nodeValue;
-    const oldText = oldInstance.element.props.nodeValue;
+    const oldText = instance.element.props.nodeValue;
     if (newText !== oldText) {
       (dom as Text).nodeValue = newText;
     }
-    return {
-      element,
-      dom,
-      hooks: [],
-      childInstances: []
-    };
+    instance.element = element;
+    return instance;
   }
 
-  updateProps(dom, element.props, oldInstance.element.props);
+  // 普通元素：更新属性，递归处理子节点
+  updateProps(dom, element.props, instance.element.props);
 
   const childInstances = reconcileChildren(
     dom,
-    oldInstance.childInstances,
+    instance.childInstances,
     element.props.children ?? []
   );
 
-  return { element, dom, hooks: [], childInstances };
+  instance.element = element;
+  instance.childInstances = childInstances;
+  return instance;
 }
 ```
 
-两条路的分叉点：`prepareHookContext` 的入参决定读到初始值还是旧值。
+### 3.3 子节点 diff：key 的作用
 
-## 七、diff 算法：子节点对比与 key 优化
+列表渲染时，需要用 `key` 来识别哪些节点可以复用：
 
-子节点对比是 React 协调算法的核心。当前实现采用「key 优先 + index 兜底」的两阶段策略。
-
-### 问题场景
-
-先看一个典型问题：
-
-```ini
-旧：[A, B, C]
-新：[X, A, B, C]  ← 在头部插入 X
-```
-
-如果单纯按 index 对比：
-- index 0: A vs X → 类型不同，unmount A，mount X
-- index 1: B vs A → 类型不同，unmount B，mount A
-- index 2: C vs B → 类型不同，unmount C，mount B
-- index 3: 无 vs C → mount C
-
-**结果**：A、B、C 被销毁重建，即使它们只是后移了一位。
-
-### 核心数据结构：orderMap
-
-`orderMap` 是新 index → 旧 index 的映射，记录「新列表第 i 个位置应该用旧列表第几个实例」：
-
-```ts
-const orderMap = new Map<number, number>();
-// orderMap.set(0, 1) 表示：新列表第0位 → 旧列表第1位（A）
-```
-
-它的作用是**在遍历新列表时，快速找到应该复用的旧实例**，同时保持正确的 DOM 插入位置。
-
-### 完整实现与四阶段流程
-
-```ts
+```typescript
 function reconcileChildren(
   container: Node,
   oldInstances: (Instance | null)[],
   elements: (Element | null)[]
 ): (Instance | null)[] {
-  // ========== 阶段一：构建 key → 旧 index 映射 ==========
   const orderMap = new Map<number, number>();
   const oldInstanceMap = new Map<string, number[]>();
   const matchedOldIndices = new Set<number>();
 
+  // 第一遍：收集带 key 的旧节点
   oldInstances.forEach((instance, index) => {
     const key = instance?.element.props?.key;
     if (key !== undefined) {
@@ -471,34 +337,30 @@ function reconcileChildren(
     }
   });
 
-  // ========== 阶段二：按 key 匹配，填充 orderMap ==========
+  // 第二遍：按 key 匹配新节点
   elements.forEach((element, index) => {
     const key = element?.props?.key;
     if (key !== undefined && oldInstanceMap.has(key)) {
       const oldIndices = oldInstanceMap.get(key)!;
       const oldIndex = oldIndices.shift()!;
       matchedOldIndices.add(oldIndex);
-      orderMap.set(index, oldIndex);  // 新index → 旧index
-      if (oldIndices.length === 0) {
-        oldInstanceMap.delete(key);
-      }
+      orderMap.set(index, oldIndex);
     }
   });
 
-  // ========== 阶段三：按顺序遍历新列表，处理匹配与新建 ==========
-  let oldIndex = 0;
+  // 第三遍：按顺序 reconcile，未匹配的创建新节点
   const instances: (Instance | null)[] = [];
+  let oldIndex = 0;
   let beforeNode: Node | null = container.firstChild;
 
   elements.forEach((element, index) => {
     let instance: Instance | null = null;
-
     if (orderMap.has(index)) {
-      // key 匹配成功：复用 orderMap 指定的旧实例
+      // 通过 key 找到对应旧节点
       oldIndex = orderMap.get(index)!;
       instance = reconcile(container, oldInstances[oldIndex], element, beforeNode);
     } else {
-      // key 未匹配：顺序查找未使用的旧实例
+      // 未匹配到：按顺序找下一个未使用的旧节点
       while (oldIndex < oldInstances.length && matchedOldIndices.has(oldIndex)) {
         oldIndex++;
       }
@@ -506,17 +368,14 @@ function reconcileChildren(
         instance = reconcile(container, oldInstances[oldIndex], element, beforeNode);
         oldIndex++;
       } else {
-        // 没有可复用的旧实例，新建
         instance = reconcile(container, null, element, beforeNode);
       }
     }
-
     instances.push(instance);
-    const currentDom = getDom(instance);
-    beforeNode = currentDom ? currentDom.nextSibling : beforeNode;
+    beforeNode = getDom(instance)?.nextSibling ?? beforeNode;
   });
 
-  // ========== 阶段四：清理多余的旧实例 ==========
+  // 卸载多余的旧节点
   for (let i = elements.length; i < oldInstances.length; i++) {
     unmount(oldInstances[i]!);
   }
@@ -525,154 +384,222 @@ function reconcileChildren(
 }
 ```
 
-### 结合例子说明
+**key 的作用示意图**：
 
-**场景：头部插入 X**
+旧列表 `[A, B, C, D]` → 新列表 `[E, A, B, C]`
 
-```tsx
-// 旧列表
-<li key="a">A</li>  // oldIndex 0
-<li key="b">B</li>  // oldIndex 1
-<li key="c">C</li>  // oldIndex 2
+```mermaid
+flowchart LR
+    %% 三列：新 elements / 旧 oldInstances / 输出 instances
+    subgraph E["新 elements（按索引，从上到下）"]
+        E0["0: E (key=e)"]
+        E1["1: A (key=a)"]
+        E2["2: B (无 key)"]
+        E3["3: C (key=c)"]
+    end
 
-// 新列表
-<li key="x">X</li>  // newIndex 0
-<li key="a">A</li>  // newIndex 1
-<li key="b">B</li>  // newIndex 2
-<li key="c">C</li>  // newIndex 3
+    subgraph O["旧 oldInstances（按索引，从上到下）"]
+        O0["0: A (key=a)"]
+        O1["1: X (无 key)"]
+        O2["2: B (无 key)"]
+        O3["3: C (key=c)"]
+    end
+
+    subgraph I["输出 instances（按 elements 顺序）"]
+        I0["instances[0]（来自 E0）"]
+        I1["instances[1]（来自 E1）"]
+        I2["instances[2]（来自 E2）"]
+        I3["instances[3]（来自 E3）"]
+    end
+
+    %% elements 与 instances 垂直对齐，一一对应
+    E0 --- I0
+    E1 --- I1
+    E2 --- I2
+    E3 --- I3
+
+    %% 先用 key 在 oldInstances 中复用
+    O0 -. "key=a" .-> I1
+    O3 -. "key=c" .-> I3
+
+    %% 剩余没有 key 或未匹配的，按索引顺序匹配
+    O2 -. "无 key，按 index 匹配" .-> I2
+
+    %% 多余的 oldInstances 直接卸载
+    O1 -. "多余 oldInstances[i] → 卸载" .-> X["unmount()"]
 ```
 
-**阶段一：构建 key 映射**
+**对比结果**：
+- **有 key**：E 新建，A/B/C 复用，D 卸载 → 仅 2 次 DOM 操作
+- **无 key**：4 次替换 + 1 次创建 → 5 次 DOM 操作，性能极差
 
-```
-oldInstanceMap = {
-  "a": [0],
-  "b": [1],
-  "c": [2]
+**结论**：列表渲染时务必使用稳定的 `key`，让 React 知道哪些节点可以复用，避免不必要的 DOM 操作。
+
+## 四、父子组件更新策略
+
+现在回答本章开头的第三个问题：**子组件状态变化，父组件会重新执行吗？父组件重新执行，子组件会重新执行吗？**
+
+### 4.1 核心机制：isDirty + parentRendered
+
+在 `updateComponent` 中有一个关键判断：
+
+```typescript
+if (!parentRendered && !instance.isDirty) {
+  // 跳过执行，复用上次的子元素
+  childElement = instance.childInstances[0]?.element ?? null;
+} else {
+  // 重新执行组件函数
+  prepareHookContext(instance);
+  childElement = (element.type as Function)(element.props);
+  clearHookContext();
 }
 ```
 
-**阶段二：key 匹配填充 orderMap**
+**两个标记**：
+- **`isDirty`**：本组件的状态是否发生了变化（由 `setState` 设置）
+- **`parentRendered`**：父组件在这一轮渲染中是否已经重新执行过
 
-遍历新列表，按 key 查找旧实例：
+**传播规则**：
+- 只有 `isDirty === true` 或 `parentRendered === true` 时，组件才会重新执行
+- 子组件 `setState` 只会设置自己的 `isDirty`，不会向上传播
+- 父组件重新执行后，会把 `currentRendered = true` 传给子组件
 
-| newIndex | key | 匹配结果 | orderMap |
-|---------|-----|---------|----------|
-| 0 | "x" | 未找到 | - |
-| 1 | "a" | oldIndex 0 | orderMap[1] = 0 |
-| 2 | "b" | oldIndex 1 | orderMap[2] = 1 |
-| 3 | "c" | oldIndex 2 | orderMap[3] = 2 |
-
-```
-orderMap = { 1→0, 2→1, 3→2 }
-matchedOldIndices = {0, 1, 2}
-```
-
-**阶段三：遍历处理**
-
-```
-newIndex 0: orderMap 无匹配 → 顺序找旧实例
-            oldIndex=0 已被匹配 → 跳过
-            oldIndex=1 已被匹配 → 跳过
-            oldIndex=2 已被匹配 → 跳过
-            oldIndex=3 越界 → 新建 X
-            
-newIndex 1: orderMap[1]=0 → 复用 oldInstances[0] (A)
-newIndex 2: orderMap[2]=1 → 复用 oldInstances[1] (B)
-newIndex 3: orderMap[3]=2 → 复用 oldInstances[2] (C)
-```
-
-**DOM 插入时序**（配合 beforeNode 保持顺序）：
+### 4.2 场景分析
 
 ```mermaid
-graph LR
-    subgraph "初始状态"
-        A1[A] --> B1[B] --> C1[C]
+graph TB
+    subgraph 场景1[场景 1：子组件状态变化]
+        S1_App[App<br/>isDirty: false<br/>跳过执行 ❌]
+        S1_Counter[Counter<br/>isDirty: true<br/>重新执行 ✅]
+        S1_App --> S1_Counter
+
+        S1_Note[触发流程：<br/>1. Counter.setState → isDirty=true<br/>2. scheduleUpdate 触发更新<br/>3. App: !false && !false → 跳过<br/>4. Counter: !false && !true → 执行]
     end
 
-    subgraph "插入 X 后"
-        X2[X] --> A2[A] --> B2[B] --> C2[C]
-    end
+    subgraph 场景2[场景 2：父组件状态变化]
+        S2_App[App<br/>isDirty: true<br/>重新执行 ✅<br/>parentRendered=true]
+        S2_Counter[Counter<br/>isDirty: false<br/>parentRendered=true<br/>重新执行 ✅]
+        S2_App --> S2_Counter
 
-    style A2 fill:#90EE90
-    style B2 fill:#90EE90
-    style C2 fill:#90EE90
-    style X2 fill:#FFB6C1
+        S2_Note[触发流程：<br/>1. App.setState → isDirty=true<br/>2. scheduleUpdate 触发更新<br/>3. App: !false && !true → 执行<br/>4. Counter 收到 parentRendered=true → 执行]
+    end
 ```
 
-- X 新建，insertBefore(beforeNode=A) → 插入到 A 前面
-- A 复用，移动到 beforeNode 前（实际位置不变）
-- B 复用，位置不变
-- C 复用，位置不变
+**结论**：
+- **子变父不变**：子组件 `setState`，只有子组件重新执行，父组件跳过
+- **父变子必变**：父组件 `setState`，父组件和所有子组件都会重新执行
 
-**结果**：A、B、C 完整复用，只新建 X。
+这正是 React 的渲染行为：状态变化只会向下传播，不会向上冒泡。
 
----
+## 五、代码汇总
 
-**场景：列表重排**
+以下是 mini-react 的精简实现代码：
+
+```typescript
+// types.ts
+type Props = { [key: string]: any; children: (Element | null)[]; };
+type Element = { type: string | Function | "TEXT_NODE"; props: Props; };
+type Instance = {
+  element: Element;
+  dom: Node | null;
+  hooks: unknown[];
+  childInstances: (Instance | null)[];
+  isDirty?: boolean;
+};
+
+// hooks.ts
+let currentInstance: Instance | null = null;
+let hookIndex = 0;
+let scheduleUpdate: () => void = () => {};
+
+export function useState<T>(initial: T) {
+  if (!currentInstance) throw new Error("useState must be called inside a component");
+  const ctx = currentInstance;
+  const i = hookIndex++;
+  if (ctx.hooks[i] === undefined) ctx.hooks[i] = initial;
+  
+  const setState = (next: T | ((p: T) => T)) => {
+    const prev = ctx.hooks[i] as T;
+    const nextValue = typeof next === "function" ? (next as (p: T) => T)(prev) : next;
+    if (!Object.is(prev, nextValue)) {
+      ctx.hooks[i] = nextValue;
+      ctx.isDirty = true;
+      scheduleUpdate();
+    }
+  };
+  return [ctx.hooks[i] as T, setState];
+}
+
+// render.ts
+export function render(element: Element, container: Node) {
+  rootElement = element;
+  rootContainer = container;
+  rootInstance = reconcile(container, rootInstance, element, container.firstChild);
+}
+
+// reconciler.ts（核心 diff 逻辑，见上文）
+```
+
+测试示例：
 
 ```tsx
-// 旧：[A, B, C]
-// 新：[C, A, B]
-```
-
-**阶段二后的 orderMap**：
-
-```
-orderMap = {
-  0 → 2,  // C 复用 oldIndex 2
-  1 → 0,  // A 复用 oldIndex 0
-  2 → 1   // B 复用 oldIndex 1
+function App() {
+  const [show, setShow] = useState(true);
+  return (
+    <div>
+      <button onClick={() => setShow(s => !s)}>Toggle</button>
+      {show && <Counter />}
+    </div>
+  );
 }
+
+function Counter() {
+  const [count, setCount] = useState(0);
+  return (
+    <div>
+      <p>{count}</p>
+      <button onClick={() => setCount(c => c + 1)}>+1</button>
+    </div>
+  );
+}
+
+render(<App />, document.getElementById('root'));
 ```
-
-**阶段三处理**：
-
-按新列表顺序遍历，通过 `beforeNode` 链依次插入：
-1. C 先插入 → 此时 DOM 顺序: [C]
-2. A 插入到 C 后面 → DOM: [C, A]
-3. B 插入到 A 后面 → DOM: [C, A, B]
-
-```mermaid
-graph LR
-    subgraph "旧列表"
-        A1[A] --> B1[B] --> C1[C]
-    end
-
-    subgraph "新列表"
-        C2[C] --> A2[A] --> B2[B]
-    end
-
-    style A2 fill:#90EE90
-    style B2 fill:#90EE90
-    style C2 fill:#90EE90
-```
-
-**结果**：C、A、B 都复用，只是调整 DOM 顺序。
-
-### 算法特点
-
-| 特性 | 说明 |
-|------|------|
-| **key 优先** | 有 key 的节点优先按 key 匹配，实现精准复用 |
-| **顺序兜底** | 无 key 节点按 index 顺序匹配，保持简单场景可用 |
-| **空间换时间** | 用 Map 存储映射关系，O(n) 时间复杂度 |
-| **beforeNode 链** | 通过 nextSibling 维护插入位置，保证 DOM 顺序正确 |
-
-### 局限
-
-当前实现仍有优化空间：
-- 列表重排时，每个节点都调用 `reconcile` 可能触发不必要的 DOM 移动
-- 最长递增子序列（LIS）算法可以进一步优化移动次数（React 18 实际采用）
-
-
 
 ## 六、小结
 
-| 问题 | 解法 |
-|------|------|
-| 状态存在哪 | `Instance.hooks`，与组件实例绑定，跨渲染周期存活 |
-| 多组件如何隔离 | `HookContext`，每次执行组件函数前后用 `prepareHookContext` / `clearHookContext` 包夹 |
-| 状态变了怎么触发更新 | `scheduleUpdate` + `queueMicrotask` 批量合并，触发 `reconcile` 从根节点 diff |
+### 本章核心知识点
 
-下一篇预告：当前协调是递归同步执行的，如果组件树很深或更新很频繁，会阻塞主线程导致卡顿。Fiber 架构通过「时间切片」把渲染工作拆成小块，可中断、可恢复，让浏览器有机会处理用户交互。
+```mermaid
+mindmap
+  root((状态与更新))
+    useState实现
+      状态存储在 Instance.hooks 数组
+      通过 currentInstance + hookIndex 定位
+      setState 设置 isDirty 触发更新
+      queueMicrotask 实现批量更新
+    diff算法
+      element null → 卸载
+      oldInstance null → 挂载
+      同类型 → 复用 DOM 更新
+      不同类型 → 替换节点
+    父子更新策略
+      isDirty：本组件状态变化
+      parentRendered：父组件重新执行
+      规则：子变父不变，父变子必变
+```
+
+### 与真实 React 的差异
+
+本章实现为了教学做了简化，真实 React 还有：
+- **Fiber 架构**：支持可中断的异步渲染、优先级调度
+- **更多 Hooks**：useEffect、useRef、useMemo 等
+- **Context / Ref**：跨组件通信和 DOM 引用
+- **合成事件系统**：统一的事件处理和委托
+
+### 下一篇预告
+
+下一篇将围绕「并发与调度」展开，重点实现：
+- Fiber 链表结构如何让渲染可中断
+- 时间切片（Time Slicing）和优先级调度
+- useEffect 的异步执行机制
