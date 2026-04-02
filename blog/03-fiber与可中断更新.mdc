@@ -1,0 +1,143 @@
+# React 原理（三）：Fiber 与可中断更新
+
+> 导读：前两篇我们实现了「JSX → Element → Instance」与「状态 + 子树 diff」。本章说明 **Fiber 架构**要解决什么问题、核心思路是什么；列出实现可中断渲染会涉及的技术与 API；指出当前 mini-react 在 **children 拍平**上与真实行为仍有差距，并给出一份 **带 Fiber 的 mini-react** 落地计划。
+
+## 一、Fiber 出现的原因与要解决的问题
+
+### 1.1 栈调和（Stack Reconciler）的局限
+
+早期 React 的更新过程可以理解为**递归遍历虚拟树**：从根节点一路向下执行 `render → diff → 更新 DOM`，直到整棵树处理完才返回。这种方式有几个问题：
+
+1. **主线程长时间被占用**：树很大或更新很频繁时，JS 执行连续占用几十毫秒甚至更长，**浏览器无法及时响应输入、滚动、动画**，用户感觉「卡顿」。
+2. **无法中断**：一旦开始一轮更新，中间不能停下来让出主线程去做更高优先级的事（例如用户输入）。
+3. **无法区分优先级**：紧急更新（输入框内容）和可延后更新（列表里很远处的节点）被一视同仁，无法「先做什么、后做什么」。
+
+### 1.2 Fiber 要解决什么
+
+Fiber 架构的目标可以概括为：
+
+- **把「一整棵树的同步工作」拆成许多小任务（Fiber 节点上的工作单元）**，在浏览器空闲时逐步做完，而不是一口气跑完。
+- **允许中断与恢复**：当前帧时间不够了，保存进度，下一帧接着做。
+- **为优先级与并发特性打基础**（如 `startTransition`、Suspense）：先提交高优先级结果，低优先级工作可以稍后提交或被丢弃。
+
+### 1.3 核心思路（概念层）
+
+1. **Fiber 即工作单元**  
+   每个 Fiber 对应一个组件或一个 DOM 节点，记录类型、props、状态、**子 / 兄弟 / 父** 指针等。树不再只靠递归隐式栈表达，而是**显式的链表结构**，便于「遍历到下一个节点」和「暂停」。
+
+2. **两阶段：render（可中断）+ commit（不可中断）**  
+   - **Render 阶段**：根据新的 Element 树构建或更新 Fiber 树（可中断、可重复）。  
+   - **Commit 阶段**：把 Fiber 上算好的变更**一次性**应用到真实 DOM（尽量短、不中断）。
+
+3. **工作循环（work loop）**  
+   用 `shouldYield` 等判断当前是否该让出主线程；若该 yield，保存 `nextUnitOfWork`，下次从断点继续。
+
+真实 React 还包含 **Lanes 优先级、并发模式、Suspense** 等；mini-react 只需先抓住「Fiber 链表 + 可拆分的工作循环」即可。
+
+---
+
+## 二、涉及的核心技术与 API（实现向）
+
+| 方向 | 作用 |
+|------|------|
+| **Fiber 节点结构** | `child`、`sibling`、`return` 构成树 + 链表；`alternate` 连接当前树与工作树（双缓冲）。 |
+| **调度（Scheduler）** | 决定「何时执行下一小片工作」。浏览器侧常见：`requestIdleCallback`（空闲回调）、`MessageChannel` / `setTimeout` 宏任务、`queueMicrotask`（微任务，通常用于批处理而非长任务切片）。 |
+| **`requestAnimationFrame`** | 与下一帧绘制对齐，可做「每帧做一点 reconcile」的简单调度（教学用）。 |
+| **`performance.now()`** | 判断是否超过本帧时间预算（time slicing）。 |
+| **React 公开 API（对照）** | `ReactDOM.createRoot` 内部走 Fiber 根；`startTransition` 标记低优先级更新；并发特性依赖 Scheduler + Fiber。 |
+
+mini-react 若只做「教学级可中断」，最小集合可以是：**Fiber 结构 + workInProgress 指针 + requestIdleCallback 或 rAF + 时间片**。
+
+---
+
+## 三、当前实现中的问题：`children` 与 `flat`
+
+当前 `createElement` 对子节点做了**一层**拍平（见 `src/mini-react/createElement.ts`）：
+
+```typescript
+children: children.flat().map((child) => {
+  if (child === false || child === null || child === undefined) return null;
+  return typeof child === "string" || typeof child === "number"
+    ? createTextElement(child)
+    : child;
+})
+```
+
+### 3.1 问题在哪
+
+1. **只拍平一层**  
+   `Array.prototype.flat()` 默认深度为 1。若运行时代入的是**多层嵌套数组**（例如手写 `[[a, b], c]` 或工具链产生的结构），与「整棵树拍平成一层合法子节点列表」的语义可能不一致；与 React 内部对 children 的**规范化**（含迭代器、Fragment、多层展开）也不等价。
+
+2. **与 diff 的假设耦合**  
+   `reconcileChildren` 按 **`element.props.children` 的一维数组下标** 做 key / 顺序匹配。若拍平方式与「开发者心智中的子树边界」不一致，会出现 **key 与节点错位**、**本应独立的列表被合成一条长列表** 等边界问题。
+
+3. **Fragment / 数组子节点**  
+   真实 React 中，子节点可能是数组、Fragment、可迭代对象；简单 `flat(1)` 无法覆盖这些类型的组合语义。
+
+### 3.2 解决方向（与 Fiber 可并行）
+
+- **短期（不引入 Fiber）**  
+  - 实现 **`flattenChildren` 语义**：递归或循环展开，直到得到 `Element | string | number | null` 的线性序列，并正确处理 **key**（含数组子节点上的 key）。  
+  - 或对齐行为：**仅展开一层 + 文档说明限制**，并在测试里覆盖「嵌套数组 + key」用例。
+
+- **中期（上 Fiber 时）**  
+  - 在 **Fiber 的 reconcile 阶段** 统一处理「子节点列表」的规范化，而不是只在 `createElement` 里 `flat` 一次，使 **Element 树与 Fiber 子链表** 一一对应。
+
+---
+
+## 四、实现「带 Fiber 的 mini-react」计划
+
+以下分阶段，可按优先级裁剪；每阶段完成后应保持可运行、可演示。
+
+### 阶段 0：基线与测试
+
+- 固定当前行为：为 `reconcileChildren`、`createElement` 的 children 增加**单元测试**（含 key、嵌套数组、null 占位）。
+- 明确目标：先实现 **可中断的 render**，commit 仍同步（教学版可接受）。
+
+### 阶段 1：Fiber 数据结构
+
+- 定义 `Fiber` 类型：`type`、`props`、`stateNode`（DOM 或 Instance 类比）、`child`、`sibling`、`return`、`alternate`、`effectTag` 等（按需最小集）。
+- 根节点 `FiberRoot` + `current` / `workInProgress` 双树入口。
+
+### 阶段 2：从递归 reconcile 到工作循环
+
+- 将「深度优先递归」改为 **`performUnitOfWork(fiber)`**：处理当前节点，返回下一个 Fiber（子 → 兄弟 → 父的兄弟）。
+- 实现 `workLoop`：`while (nextUnitOfWork && !shouldYield()) { nextUnitOfWork = performUnitOfWork(...) }`。
+- `shouldYield`：基于 `performance.now()` 与帧预算（如 5ms）或 `requestIdleCallback` 的 deadline。
+
+### 阶段 3：调度器接入
+
+- 使用 `requestIdleCallback`（含降级：`setTimeout` / `MessageChannel`）或 `requestAnimationFrame` 驱动 `workLoop`。
+- 更新入口（如 `setState`）不再同步跑满整棵树，而是 **`scheduleUpdate` → 推入任务队列 → 空闲时执行 workLoop**。
+
+### 阶段 4：Commit 阶段
+
+- Render 阶段只标记 **副作用**（增删改 DOM）；Commit 阶段**单次遍历**应用 DOM，避免中途被打断导致不一致。
+- 与现有 `updateProps`、`reconcileChildren` 逻辑对齐或逐步迁移。
+
+### 阶段 5：Hooks 与 Fiber 绑定
+
+- 将 `hooks` 数组从 `Instance` 迁到 **Fiber**（或 Fiber 上的 `memoizedState` 链表），保证同一组件实例在多次中断间状态一致。
+
+### 阶段 6（可选）：优先级与体验
+
+- 简单优先级队列（如：用户输入 > 过渡更新）。
+- 或接入 `startTransition` 的简化版（标记低优先级更新）。
+
+### 阶段 7：children 规范化
+
+- 替换或增强 `createElement` 中的 `flat`，实现与测试对齐的 **`flattenChildren`**，消除第三节所述 diff 风险。
+
+---
+
+## 五、小结
+
+| 主题 | 要点 |
+|------|------|
+| **为何要有 Fiber** | 避免长时间阻塞主线程；支持中断、恢复与后续优先级 / 并发能力。 |
+| **核心思路** | Fiber 链表 + render/commit 两阶段 + 工作循环 + 调度。 |
+| **技术与 API** | Fiber 结构、Scheduler、`requestIdleCallback` / rAF、`performance.now()` 等。 |
+| **当前代码风险** | `children.flat(1)` 与复杂 children 语义不完全一致，可能影响 reconcile 正确性，需规范化或递归展开。 |
+| **落地顺序** | 先 Fiber 数据结构与 workLoop，再调度，再 commit 分离，再 hooks 迁移，最后 children 与优先级增强。 |
+
+本篇停留在**原理与路线图**；具体 Fiber 字段与 `performUnitOfWork` 伪代码可在实现时另文或配合源码注释展开。
