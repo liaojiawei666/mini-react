@@ -1,6 +1,7 @@
-/** @format */
+export { createElement, createFiber } from "./create";
+export { useState } from "./hook";
+export { render, rerender } from "./render";
+export type { ReactElement, ReactNode, Props } from "./types";
 
-export { createElement } from "./createElement";
-export { render } from "./render";
-export { useState } from "./hooks";
-export type { Element, Props, Instance } from "./types";
+/** JSX 命名空间使用的虚拟节点类型 */
+export type VNode = import("./types").ReactElement;

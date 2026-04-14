@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from "vite";
 
 export default defineConfig({
@@ -7,5 +8,9 @@ export default defineConfig({
       pragma: "createElement",
       pragmaFrag: "Fragment",
     },
+  },
+  test: {
+    environment: "happy-dom",
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
   },
 });
